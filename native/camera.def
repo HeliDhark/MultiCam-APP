@@ -1,0 +1,4 @@
+LIBRARY "MultiCam.Camera.dll"
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

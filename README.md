@@ -1,0 +1,42 @@
+# MultiCam para Windows 10
+
+Protótipo local: uma câmera virtual DirectShow por placa USB, com nomes próprios, captura compartilhada entre processos, detecção de conexão/remoção e painel na bandeja. Vídeo apenas. Não depende do OBS instalado nem usa a API de câmera virtual do Windows 11.
+
+## Uso
+
+1. Compile com `./build.ps1` ou abra `dist/MultiCam.exe` se já compilado. Mantenha as pastas x64 e x86 junto do executável.
+2. O programa detecta placas USB e tenta 1920×1080 a aproximadamente 60 FPS quando anunciado pelo driver. Uma fonte ocupada gera erro; feche o acesso direto à placa e tente novamente.
+3. Selecione a placa no painel, escolha o nome e o modo de captura e clique em **Aplicar**. Cada placa deve ter um nome diferente. Os modos são possibilidades anunciadas pelo driver, confirmadas ao abrir a captura; nem todo driver anuncia corretamente.
+   Opções com a mesma resolução, formato e FPS exibido aparecem uma única vez. Variações mínimas de intervalo que arredondam para 60 FPS são agrupadas; 59,94 FPS, 60 FPS, YUY2 e MJPEG continuam separados. O intervalo exato já escolhido é preservado.
+4. Nos aplicativos selecione **Nome (Multi)**. Use a câmera virtual em todos os programas que compartilham a placa. O original continuará aparecendo, com o nome de fábrica.
+5. Marque **Iniciar com o Windows** para iniciar na bandeja no login do seu usuário. Fechar a janela mantém o programa funcionando; **Sair e liberar as placas**, no ícone da bandeja, encerra a captura e retira as câmeras virtuais da enumeração.
+
+Configurações ficam em `dist/data/settings.json`, com cópia `.bak`, e o diagnóstico em `dist/data/multicam.log`. O registro das câmeras é por usuário, nas duas arquiteturas, sem driver de kernel. Não mova a pasta enquanto estiver rodando; abra novamente a partir do novo local e atualize a opção de inicialização se a mover.
+
+## Comportamento e limites do protótipo
+
+- O monitor consulta a enumeração a cada 2 segundos, com antecipação ao receber evento de dispositivo. Registra a câmera virtual somente após receber quadros reais. Se a placa sumir da lista, a entrada virtual só é retirada depois de 10 segundos; falhas curtas não derrubam a câmera nos aplicativos. Se a captura encerrar, ela é reiniciada em 2 segundos mantendo a câmera registrada, e o registro só é retirado após 3 falhas seguidas. Programas com lista em cache podem exigir reabrir a lista ou reiniciar. O painel mantém o perfil desconectado para preservar o nome.
+- O transporte usa uma fila de 3 quadros sem mutex: o worker grava no próximo slot e só então o publica, e cada consumidor lê sem bloquear e descarta cópias inconsistentes. Se não chegar quadro novo, o consumidor repete o último quadro válido por até 500 ms e só então mostra preto.
+- Identidade usa serial USB quando o Windows indica que ele é único; caso contrário, usa o caminho da instância, normalmente associado à porta USB. Dispositivos sem serial ou com serial clonado não podem ser reconhecidos infalivelmente após trocar portas. Identidades duplicadas simultâneas usam o caminho de cada porta. Não se usa o nome genérico “USB 3” para selecionar a captura.
+- Não existe limite artificial de 30 FPS na captura. 59,94, 60 ou outras taxas são configuradas pelo intervalo anunciado pelo driver. Cada consumidor pode ler a taxa principal ou 30/15 FPS. O aplicativo de destino pode impor seu próprio limite.
+- Uma resolução de captura é compartilhada por placa. Para mudar resolução/FPS, aplique no painel e reabra a câmera virtual nos consumidores. Este protótipo não faz conversão independente de resolução para cada consumidor.
+- Transporte YUY2 em memória compartilhada, até 4096×2160, sem codificação com perdas adicional. MJPEG é decodificado pelo libjpeg-turbo incluído; outros formatos usam os conversores DirectShow disponíveis. Modos sem conversor disponível dão erro explícito. HDR/10-bit, áudio, PCIe e dispositivos com SDK proprietário não são parte desta versão.
+- Distribuir vídeo exige memória/CPU; 4K60 em várias placas e vários consumidores precisa de medição no equipamento. Nenhuma garantia de desempenho 4K60 foi feita. “4K” na embalagem pode significar entrada/pass-through e não captura 4K60.
+- A biblioteca pode negociar modos próximos: o worker verifica dimensões e intervalo e rejeita mudanças, em vez de reduzir FPS silenciosamente. O painel mostra FPS de quadros recebidos, não uma estimativa da configuração.
+- Um modo anunciado como 50/60 FPS pode entregar menos quadros reais. Se a entrada entregar 30 quadros por segundo, um consumidor configurado em 60 receberá repetições; o programa não cria movimento adicional. A coluna **FPS recebidos** permite verificar isso. A taxa de cada consumidor é independente da captura, mas não aumenta a taxa real da placa.
+- Se o processo principal falhar, os workers observam seu encerramento e liberam as placas. As entradas virtuais residuais são limpas na próxima inicialização. Clientes abertos recebem preto quando os quadros param. Listas de outros aplicativos não podem ser forçadas a atualizar.
+- Compatibilidade é com consumidores DirectShow de 32 e 64 bits. Aplicativos que exigem dispositivo físico ou usam exclusivamente outra API precisam de validação separada.
+
+## Remover integração
+
+Saia pelo ícone na bandeja. Execute `dist/MultiCam.exe --uninstall` para remover registros virtuais e inicialização automática; depois pode apagar a pasta. O áudio e o driver original não são modificados.
+
+## Compilação e código
+
+Requer Windows 10 x64, .NET Framework 4.8, Build Tools do Visual Studio com C++/Windows SDK e CMake. `build.ps1` compila o worker e a câmera x64/x86 e o painel C# sem NuGet. O painel usa o worker x64 (o pacote JPEG é x64); os consumidores podem ser x64 ou x86. As dependências estão em `third_party/libdshowcapture` (LGPL-2.1-or-later) e `third_party/turbojpeg` (BSD/IJG), com avisos preservados. Veja `THIRD_PARTY.md`. Não são necessários downloads ao compilar esta cópia completa.
+
+Sem Visual Studio instalado, `build.ps1` usa automaticamente uma toolchain portátil em `.buildtools/` (MSVC e Windows SDK em `.buildtools/msvc`, CMake em `.buildtools/cmake-*` e Ninja em `.buildtools/ninja`), sem instalar nada no sistema. Para criá-la: `python portable-msvc.py --accept-license --target x64,x86 --host x64` dentro de `.buildtools` (script de mmozeiko, que baixa o MSVC e o SDK da Microsoft e exige aceitar a licença), e baixe os zips do CMake 3.28+ e do Ninja para as pastas acima. A pasta é ignorada pelo git.
+
+Arquitetura: `app/MultiCam.cs` gerencia ciclo de vida e configurações; `native/worker.cpp` enumera/captura cada placa; `native/channel.hpp` define o transporte local; `native/camera.cpp` fornece o filtro DirectShow por câmera dentro de cada consumidor. Os DLLs têm registro COM próprio e não substituem os do OBS.
+
+Esta é uma versão de desenvolvimento. Consulte `VALIDATION.md` para os testes realizados e pendências antes de uso em produção.

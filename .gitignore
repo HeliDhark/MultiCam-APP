@@ -1,0 +1,9 @@
+build/
+dist/
+artifacts/
+.vs/
+*.user
+third_party/**/.git
+.buildtools/
+.superpowers/
+MultiCam-Final/
