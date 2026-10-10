@@ -1,4 +1,4 @@
-param([switch]$SkipX86)
+param([switch]$SkipX86,[string]$Target)
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
 function Invoke-BuildTool([string]$File, [string[]]$ToolArgs) {
@@ -34,14 +34,15 @@ else {
 }
 $savedPath = $env:PATH; $savedInclude = $env:INCLUDE; $savedLib = $env:LIB
 foreach ($arch in @('x64','Win32')) {
-    if ($arch -eq 'Win32' -and $SkipX86) { continue }
+    if ($arch -eq 'Win32' -and ($SkipX86 -or $Target)) { continue }
     $dest = Join-Path $taskRoot ('dist/' + $(if ($arch -eq 'Win32') {'x86'} else {'x64'}))
     if ($usePortable) {
         $env:PATH = $savedPath; $env:INCLUDE = $savedInclude; $env:LIB = $savedLib
         Import-PortableEnvironment $(if ($arch -eq 'Win32') {'x86'} else {'x64'})
         $build = Join-Path $taskRoot "build/ninja-$arch"
         Invoke-BuildTool $cmake @('-S',$taskRoot,'-B',$build,'-G','Ninja','-DCMAKE_BUILD_TYPE=Release','-DCMAKE_C_COMPILER=cl','-DCMAKE_CXX_COMPILER=cl')
-        Invoke-BuildTool $cmake @('--build',$build,'--parallel')
+        Invoke-BuildTool $cmake (@('--build',$build,'--parallel') + $(if ($Target) { @('--target',$Target) }))
+        if ($Target) { exit 0 }
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         Copy-Item -LiteralPath "$build/MultiCam.Camera.dll","$build/MultiCam.Worker.exe" -Destination $dest
         # tests/integration.ps1 looks for the test tool under build/<arch>/Release.
@@ -52,7 +53,8 @@ foreach ($arch in @('x64','Win32')) {
     }
     $build = Join-Path $taskRoot "build/$arch"
     Invoke-BuildTool $cmake @('-S',$taskRoot,'-B',$build,'-A',$arch)
-    Invoke-BuildTool $cmake @('--build',$build,'--config','Release','--parallel')
+    Invoke-BuildTool $cmake (@('--build',$build,'--config','Release','--parallel') + $(if ($Target) { @('--target',$Target) }))
+    if ($Target) { exit 0 }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Copy-Item -LiteralPath "$build/Release/MultiCam.Camera.dll","$build/Release/MultiCam.Worker.exe" -Destination $dest
 }

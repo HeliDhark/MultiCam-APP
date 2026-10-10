@@ -72,7 +72,7 @@ Regras de `fitRect`/`keepAspect`: proporção calculada com inteiros e arredonda
   - `fit_contain`: `fitRect({1920,1080},{1000,1000},Contain)` == `{0,218,1000,563}`.
   - `fit_fill`: o mesmo com `Fill` == `{-389,0,1778,1000}`.
   - `fit_same_aspect`: `fitRect({1280,720},{640,360},Contain)` == `{0,0,640,360}`.
-  - `aspect_width_leads`: `keepAspect({700,300},{1920,1080},true,{160,90},{3840,2160})` == `{700,394}`; com `false` == `{534,300}`.
+  - `aspect_width_leads`: `keepAspect({700,300},{1920,1080},true,{160,90},{3840,2160})` == `{700,394}`; com `false` == `{533,300}`.
   - `aspect_limits`: `keepAspect({50,10},...)` == `{160,90}`; `keepAspect({5000,5000},...,true,...)` == `{3840,2160}`.
   - `clamp_offscreen`: monitor `{0,0,1920,1080}`, janela `{5000,5000,640,360}` == `{1280,720,640,360}`.
   - `clamp_two_monitors`: monitores `{0,0,1920,1080}` e `{1920,0,1280,1024}`, janela `{1800,100,640,360}` == `{1920,100,640,360}`.
