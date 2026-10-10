@@ -85,6 +85,16 @@ public:
     }
     void stop() { if (view_) header()->active = 0; }
 
+    // Reader. Current source size; true only for an active, plausible YUY2 frame size.
+    bool peekSize(uint32_t& width, uint32_t& height) {
+        if (!view_) return false;
+        auto hdr = header();
+        const uint32_t w = hdr->width, h = hdr->height;
+        if (hdr->magic != Magic || !hdr->active || w < 2 || w > 4096 || h < 2 || h > 2160 || (w & 1)) return false;
+        width = w; height = h;
+        return true;
+    }
+
     // Reader. Never blocks. Keeps the last complete frame so callers can repeat it.
     Read read(uint32_t w, uint32_t h) {
         auto hdr = header();

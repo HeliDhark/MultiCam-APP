@@ -9,14 +9,17 @@
 #include <stdexcept>
 using namespace DShow;
 static void check(HRESULT hr,const char* where) {if(FAILED(hr)) {std::cerr<<where<<" HRESULT 0x"<<std::hex<<hr<<"\n";throw std::runtime_error(where);}}
-static int produce(const std::wstring& id,int w,int h,long long interval,int seconds) {
+// solid: when non-null, every frame is YUY2 {y,u,y,v} instead of the numbered test pattern.
+static int produce(const std::wstring& id,int w,int h,long long interval,int seconds,const int* solid=nullptr) {
     multi::Channel c;if(!c.open(id,true))return 2;
     c.begin(uint32_t(w),uint32_t(h),interval);
     auto end=std::chrono::steady_clock::now()+std::chrono::seconds(seconds),next=std::chrono::steady_clock::now();
     uint32_t sequence=0;timeBeginPeriod(1);
     while(std::chrono::steady_clock::now()<end) {
-        ++sequence;auto slot=c.writeSlot();memset(slot,sequence%200+20,size_t(w)*h*2);
-        memcpy(slot,&sequence,4);memcpy(slot+size_t(w)*h*2-4,&sequence,4);
+        ++sequence;auto slot=c.writeSlot();
+        if(solid){for(size_t i=0;i<size_t(w)*h*2;i+=4){slot[i]=uint8_t(solid[0]);slot[i+1]=uint8_t(solid[1]);slot[i+2]=uint8_t(solid[0]);slot[i+3]=uint8_t(solid[2]);}}
+        else{memset(slot,sequence%200+20,size_t(w)*h*2);
+        memcpy(slot,&sequence,4);memcpy(slot+size_t(w)*h*2-4,&sequence,4);}
         c.publish();
         next+=std::chrono::nanoseconds(interval*100);std::this_thread::sleep_until(next);
     }
@@ -56,6 +59,8 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
 }
 int wmain(int argc,wchar_t** argv){CoInitializeEx(nullptr,COINIT_MULTITHREADED);int result=1;
     try { if(argc==7&&std::wstring(argv[1])==L"--produce")result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]));
+        else if(argc==10&&std::wstring(argv[1])==L"--produce-solid"){const int yuv[3]={std::stoi(argv[7]),std::stoi(argv[8]),std::stoi(argv[9])};
+            result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),yuv);}
         else if(argc==5&&std::wstring(argv[1])==L"--consume")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]));
         else if(argc==5&&std::wstring(argv[1])==L"--observe")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]),true);
     }catch(const std::exception&e){std::cerr<<e.what()<<"\n";result=10;}CoUninitialize();return result;

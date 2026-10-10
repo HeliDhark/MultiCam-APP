@@ -17,6 +17,8 @@ public:
     bool upload(const uint8_t* yuy2, int width, int height);
     void draw(viewer::Fit fit);
     void present();
+    // Forget the current picture: the next draw() shows black until upload() runs again.
+    void clear() { hasFrame_ = false; }
     // Top-down BGRA copy of the target. Call before present().
     bool readback(std::vector<uint8_t>& bgra, int& width, int& height);
 

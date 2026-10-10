@@ -45,6 +45,7 @@ foreach ($arch in @('x64','Win32')) {
         if ($Target) { exit 0 }
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
         Copy-Item -LiteralPath "$build/MultiCam.Camera.dll","$build/MultiCam.Worker.exe" -Destination $dest
+        if ($arch -eq 'x64' -and (Test-Path "$build/MultiCam.Viewer.exe")) { Copy-Item -LiteralPath "$build/MultiCam.Viewer.exe" -Destination $dest }
         # tests/integration.ps1 looks for the test tool under build/<arch>/Release.
         $tools = Join-Path $taskRoot "build/$arch/Release"
         New-Item -ItemType Directory -Force -Path $tools | Out-Null
@@ -57,6 +58,7 @@ foreach ($arch in @('x64','Win32')) {
     if ($Target) { exit 0 }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     Copy-Item -LiteralPath "$build/Release/MultiCam.Camera.dll","$build/Release/MultiCam.Worker.exe" -Destination $dest
+    if ($arch -eq 'x64' -and (Test-Path "$build/Release/MultiCam.Viewer.exe")) { Copy-Item -LiteralPath "$build/Release/MultiCam.Viewer.exe" -Destination $dest }
 }
 $env:PATH = $savedPath; $env:INCLUDE = $savedInclude; $env:LIB = $savedLib
 $csc = "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
