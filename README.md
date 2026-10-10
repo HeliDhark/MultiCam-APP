@@ -4,7 +4,7 @@ Protótipo local: uma câmera virtual DirectShow por placa USB, com nomes própr
 
 ## Uso
 
-1. Compile com `./build.ps1` ou abra `dist/MultiCam.exe` se já compilado. Mantenha as pastas x64 e x86 junto do executável.
+1. Compile com `./build.ps1` ou abra `dist/MultiCam.exe` se já compilado. Mantenha as pastas x64 e x86 junto do executável. Para conferir que uma pasta roda em outro PC sem instalar nada: `tests/portable-check.ps1 -Root <pasta>`.
 2. O programa detecta placas USB e tenta 1920×1080 a aproximadamente 60 FPS quando anunciado pelo driver. Uma fonte ocupada gera erro; feche o acesso direto à placa e tente novamente.
 3. Selecione a placa no painel, escolha o nome e o modo de captura e clique em **Aplicar**. Cada placa deve ter um nome diferente. Os modos são possibilidades anunciadas pelo driver, confirmadas ao abrir a captura; nem todo driver anuncia corretamente.
    Opções com a mesma resolução, formato e FPS exibido aparecem uma única vez. Variações mínimas de intervalo que arredondam para 60 FPS são agrupadas; 59,94 FPS, 60 FPS, YUY2 e MJPEG continuam separados. O intervalo exato já escolhido é preservado.
@@ -12,6 +12,16 @@ Protótipo local: uma câmera virtual DirectShow por placa USB, com nomes própr
 5. Marque **Iniciar com o Windows** para iniciar na bandeja no login do seu usuário. Fechar a janela mantém o programa funcionando; **Sair e liberar as placas**, no ícone da bandeja, encerra a captura e retira as câmeras virtuais da enumeração.
 
 Configurações ficam em `dist/data/settings.json`, com cópia `.bak`, e o diagnóstico em `dist/data/multicam.log`. O registro das câmeras é por usuário, nas duas arquiteturas, sem driver de kernel. Não mova a pasta enquanto estiver rodando; abra novamente a partir do novo local e atualize a opção de inicialização se a mover.
+
+## PiP e papel de parede ao vivo
+
+Cada câmera pode ter uma janela **PiP** sem bordas, e uma câmera pode virar o **papel de parede** de um monitor. Os dois leem os quadros do mesmo canal da câmera virtual, então não abrem a placa de novo nem atrapalham os outros aplicativos. Quem desenha é `x64/MultiCam.Viewer.exe` (Direct3D 11); o painel inicia e encerra esse programa sozinho.
+
+- **PiP**, no editor da câmera: *PiP ativo*, *Sempre à frente*, *Travar*, *Tamanho* (320, 480, 640 ou 960 de largura, na proporção do modo da câmera) e *Restaurar posição*. Arraste a imagem para mover e as bordas para redimensionar; a proporção é mantida e a roda do mouse não faz nada. Travado, o PiP ignora cliques de mover e redimensionar. O botão direito abre *Travar*, *Sempre à frente* e *Fechar PiP*. Posição, tamanho e opções ficam em `data/settings.json` e voltam ao abrir o programa.
+- **Papel de parede**, na seção *Papel de parede ao vivo*: *Ativar*, câmera, monitor, **30 ou 60 FPS** e *Preencher* (cobre o monitor, cortando as sobras) ou *Ajustar* (mostra a imagem inteira, com faixas pretas). Ícones e barra de tarefas continuam por cima. O desenho pausa com a sessão bloqueada ou quando um programa em tela cheia cobre o monitor. Ao desativar ou sair, o Windows volta ao seu papel de parede normal; a configuração do papel de parede do Windows não é alterada. O texto ao lado mostra os FPS desenhados.
+- Sem quadro novo, PiP e papel de parede repetem a última imagem por até 500 ms e depois mostram preto, como a câmera virtual. Um visualizador que falha é reiniciado em 2 s; depois de 3 falhas seguidas o painel mostra o motivo.
+- Limites: o papel de parede usa a janela `WorkerW` do Explorer, validada no Windows 10 (build 19044). No Windows 11 24H2 a estrutura mudou e o modo papel de parede deve falhar com mensagem clara em vez de tela preta. Não vale para a tela de bloqueio.
+- Linha de comando do visualizador (para diagnóstico): `MultiCam.Viewer.exe --pip <guid> <x> <y> <largura> <altura> <topmost 0|1> <travado 0|1> <pidDoPainel>` e `MultiCam.Viewer.exe --wallpaper <guid> <monitor> <30|60> <fill|contain> <pidDoPainel>`. Comandos pela entrada padrão: `lock 0|1`, `topmost 0|1`, `resize L A`, `move X Y`, `quit`.
 
 ## Comportamento e limites do protótipo
 
@@ -37,6 +47,6 @@ Requer Windows 10 x64, .NET Framework 4.8, Build Tools do Visual Studio com C++/
 
 Sem Visual Studio instalado, `build.ps1` usa automaticamente uma toolchain portátil em `.buildtools/` (MSVC e Windows SDK em `.buildtools/msvc`, CMake em `.buildtools/cmake-*` e Ninja em `.buildtools/ninja`), sem instalar nada no sistema. Para criá-la: `python portable-msvc.py --accept-license --target x64,x86 --host x64` dentro de `.buildtools` (script de mmozeiko, que baixa o MSVC e o SDK da Microsoft e exige aceitar a licença), e baixe os zips do CMake 3.28+ e do Ninja para as pastas acima. A pasta é ignorada pelo git.
 
-Arquitetura: `app/MultiCam.cs` gerencia ciclo de vida e configurações; `native/worker.cpp` enumera/captura cada placa; `native/channel.hpp` define o transporte local; `native/camera.cpp` fornece o filtro DirectShow por câmera dentro de cada consumidor. Os DLLs têm registro COM próprio e não substituem os do OBS.
+Arquitetura: `app/MultiCam.cs` gerencia ciclo de vida e configurações; `app/Viewers.cs` guarda as opções de PiP e papel de parede e gerencia os processos `native/viewer.cpp` (Direct3D 11, shader `native/viewer.hlsl` compilado no build com `fxc`, sem `d3dcompiler` em tempo de execução); `native/worker.cpp` enumera/captura cada placa; `native/channel.hpp` define o transporte local; `native/camera.cpp` fornece o filtro DirectShow por câmera dentro de cada consumidor. Os DLLs têm registro COM próprio e não substituem os do OBS.
 
 Esta é uma versão de desenvolvimento. Consulte `VALIDATION.md` para os testes realizados e pendências antes de uso em produção.

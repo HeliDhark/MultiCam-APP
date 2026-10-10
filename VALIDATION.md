@@ -54,6 +54,18 @@ Validações finais:
 
 Esses resultados correspondem aos modos acima e ao conteúdo recebido durante o teste. A medição conta quadros após decodificação/publicação, e não pacotes USB ou imagens visualmente distintas.
 
+## PiP e papel de parede ao vivo — 2026-10-10
+
+Toolchain portátil (`.buildtools`, MSVC 14.51) no Windows 10 build 19044 deste computador.
+
+- `tests/viewer.ps1`, 12 casos, todos PASS. PiP: cor da conversão YUY2→RGB conferida em snapshot (vermelho puro BT.601), teste de clique com e sem *Travar*, troca de resolução da origem com ajuste da altura, saída quando o painel morre, linhas inválidas na entrada padrão, argumentos inválidos. Papel de parede: janela filha da `WorkerW`, média de 30 FPS desenhados com a opção 30 e de 60 com a opção 60 (fonte a 60), snapshot do monitor inteiro em *Ajustar*, monitor inexistente (código 4), saída quando o painel morre.
+- `tests/panel.ps1`, 8 casos PASS: configurações antigas carregam, valores inválidos são corrigidos, presets 16:9 e 4:3, ciclo de vida de um PiP real, limite de 3 reinícios.
+- `tests/integration.ps1` continua PASS depois das mudanças (307/154 amostras, zero rasgados, zero pretos).
+- Verificação visual no PC: com o papel de parede ativo, ícones e barra de tarefas aparecem por cima; ao sair, o papel de parede original volta.
+- `tests/portable-check.ps1` sobre o pacote limpo: só DLLs do Windows, sem runtime extra, sem `data`.
+
+Pendente, só manual: mover, redimensionar, travar e destravar o PiP pelo painel com uma placa real; conferir que posição e tamanho voltam ao reiniciar; pausa do papel de parede com um programa em tela cheia; uso de CPU/GPU do papel de parede a 60 FPS; Windows 11.
+
 ## Reproduzir
 
 `tests/integration.ps1` registra uma câmera temporária, produz quadros sintéticos, abre dois consumidores, verifica integridade/temporização e remove a entrada em `finally`. `-Width 3840 -Height 2160` exercita 4K60.
@@ -63,6 +75,8 @@ Esses resultados correspondem aos modos acima e ao conteúdo recebido durante o 
 `dist/MultiCam.exe --diagnose` exercita o aplicativo completo durante aproximadamente 12 segundos, salva o relatório e uma imagem somente do painel em `artifacts/ui` e encerra. Perfis ficam salvos; a inicialização automática não é ativada pelo teste.
 
 `python tests/live_status.py --seconds 10` lê apenas os contadores das capturas já abertas, sem acessar pixels nem abrir as placas novamente. `--output artifacts/status.json` salva a medição.
+
+`tests/viewer.ps1` compila e testa o visualizador (PiP e papel de parede; a área de trabalho muda por alguns segundos). `tests/panel.ps1` testa a lógica do painel depois de `./build.ps1`. `tests/portable-check.ps1 [-Root pasta]` falha se algum binário depender de algo fora do Windows ou se houver a pasta `data`.
 
 O alvo CMake `MultiCam.JpegTest` é opcional: compile-o com `--config Release --target MultiCam.JpegTest`, coloque `turbojpeg.dll` ao lado do executável em `build/x64/Release` e execute-o para comparar a conversão com a fórmula de referência.
 

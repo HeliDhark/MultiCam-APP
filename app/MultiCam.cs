@@ -177,15 +177,28 @@ namespace MultiCam {
         CheckBox startup=new CheckBox { Text="Iniciar com o Windows",AutoSize=true };
         Label detail=new Label { Dock=DockStyle.Fill,AutoEllipsis=true,Padding=new Padding(12),ForeColor=Color.DimGray };
         Label status=new Label { Dock=DockStyle.Bottom,Height=34,Padding=new Padding(12,8,0,0) };
+        // PiP of the selected camera (applied immediately) and the wallpaper section.
+        ViewerManager viewers=new ViewerManager(System.IO.Path.Combine(Storage.Root,"x64","MultiCam.Viewer.exe"),Process.GetCurrentProcess().Id);
+        CheckBox pipEnabled=new CheckBox { Text="PiP ativo",AutoSize=true };
+        CheckBox pipTop=new CheckBox { Text="Sempre à frente",AutoSize=true };
+        CheckBox pipLock=new CheckBox { Text="Travar",AutoSize=true };
+        ComboBox pipSize=new ComboBox { Width=130,DropDownStyle=ComboBoxStyle.DropDownList };
+        Button pipRestore=new Button { Text="Restaurar posição",AutoSize=true };
+        CheckBox wallEnabled=new CheckBox { Text="Ativar",AutoSize=true };
+        ComboBox wallCamera=new ComboBox { Width=220,DropDownStyle=ComboBoxStyle.DropDownList };
+        ComboBox wallMonitor=new ComboBox { Width=260,DropDownStyle=ComboBoxStyle.DropDownList };
+        RadioButton wall30=new RadioButton { Text="30 FPS",AutoSize=true }, wall60=new RadioButton { Text="60 FPS",AutoSize=true };
+        RadioButton wallFill=new RadioButton { Text="Preencher",AutoSize=true }, wallContain=new RadioButton { Text="Ajustar",AutoSize=true };
+        Label wallStatus=new Label { AutoSize=true,ForeColor=Color.DimGray,Padding=new Padding(8,5,0,0) };
         bool busy,exiting,loading,closePending;
         Camera Selected { get { return list.SelectedItems.Count>0?(Camera)list.SelectedItems[0].Tag:null; } }
         public MainForm(Config state,bool hidden) {
-            config=state; Text="MultiCam · Compartilhar câmeras"; MinimumSize=new Size(980,620); Size=new Size(1120,710);
+            config=state; Text="MultiCam · Compartilhar câmeras"; MinimumSize=new Size(1040,760); Size=new Size(1180,840);
             Icon=System.Drawing.Icon.ExtractAssociatedIcon(typeof(MainForm).Assembly.Location);
             Font=new Font("Segoe UI",10); StartPosition=FormStartPosition.CenterScreen;
             var title=new Label { Dock=DockStyle.Top,Height=82,Text="MultiCam\nUma placa. Vários programas. Até o FPS real da captura.",Font=new Font("Segoe UI",14),Padding=new Padding(16) };
-            foreach(var col in new[]{new ColumnHeader { Text="Câmera Multi",Width=205 },new ColumnHeader {Text="Nome original",Width=160},new ColumnHeader{Text="Estado",Width=180},new ColumnHeader{Text="Captura configurada",Width=310},new ColumnHeader{Text="FPS recebidos",Width=120}})list.Columns.Add(col);
-            var editor=new FlowLayoutPanel { Dock=DockStyle.Bottom,Height=112,Padding=new Padding(12),WrapContents=true };
+            foreach(var col in new[]{new ColumnHeader { Text="Câmera Multi",Width=205 },new ColumnHeader {Text="Nome original",Width=160},new ColumnHeader{Text="Estado",Width=180},new ColumnHeader{Text="Captura configurada",Width=310},new ColumnHeader{Text="FPS recebidos",Width=110},new ColumnHeader{Text="Exibição",Width=170}})list.Columns.Add(col);
+            var editor=new FlowLayoutPanel { Dock=DockStyle.Bottom,Height=150,Padding=new Padding(12),WrapContents=true };
             editor.Controls.Add(new Label {Text="Nome:",AutoSize=true,Padding=new Padding(0,5,0,0)}); editor.Controls.Add(alias);
             editor.Controls.Add(new Label {Text="Modo:",AutoSize=true,Padding=new Padding(10,5,0,0)}); editor.Controls.Add(modes);
             editor.SetFlowBreak(modes,true); editor.Controls.Add(enabled);
@@ -193,8 +206,32 @@ namespace MultiCam {
             var refresh=new Button {Text="Reler modos",AutoSize=true}; refresh.Click+=async(s,e)=>await ReloadModes(); editor.Controls.Add(refresh);
             var folder=new Button {Text="Abrir diagnóstico",AutoSize=true}; folder.Click+=(s,e)=>Process.Start("explorer.exe",Native.Quote(Storage.Data)); editor.Controls.Add(folder);
             editor.Controls.Add(startup);
+            editor.SetFlowBreak(startup,true);
+            editor.Controls.Add(new Label {Text="PiP:",AutoSize=true,Padding=new Padding(0,5,0,0)});
+            editor.Controls.Add(pipEnabled); editor.Controls.Add(pipTop); editor.Controls.Add(pipLock);
+            editor.Controls.Add(new Label {Text="Tamanho:",AutoSize=true,Padding=new Padding(10,5,0,0)}); editor.Controls.Add(pipSize);
+            editor.Controls.Add(pipRestore);
+            var wall=new GroupBox { Text="Papel de parede ao vivo",Dock=DockStyle.Bottom,Height=78,Padding=new Padding(10,4,10,4) };
+            var wallRow=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false };
+            wallRow.Controls.Add(wallEnabled);
+            wallRow.Controls.Add(new Label {Text="Câmera:",AutoSize=true,Padding=new Padding(10,5,0,0)}); wallRow.Controls.Add(wallCamera);
+            wallRow.Controls.Add(new Label {Text="Monitor:",AutoSize=true,Padding=new Padding(10,5,0,0)}); wallRow.Controls.Add(wallMonitor);
+            var fpsGroup=new FlowLayoutPanel { AutoSize=true,WrapContents=false,Margin=new Padding(10,0,0,0) }; fpsGroup.Controls.Add(wall30); fpsGroup.Controls.Add(wall60);
+            var fitGroup=new FlowLayoutPanel { AutoSize=true,WrapContents=false,Margin=new Padding(10,0,0,0) }; fitGroup.Controls.Add(wallFill); fitGroup.Controls.Add(wallContain);
+            wallRow.Controls.Add(fpsGroup); wallRow.Controls.Add(fitGroup); wallRow.Controls.Add(wallStatus);
+            wall.Controls.Add(wallRow);
             var detailsPanel=new Panel {Dock=DockStyle.Bottom,Height=100}; detailsPanel.Controls.Add(detail);
-            Controls.Add(list); Controls.Add(detailsPanel); Controls.Add(editor); Controls.Add(status); Controls.Add(title);
+            Controls.Add(list); Controls.Add(detailsPanel); Controls.Add(editor); Controls.Add(wall); Controls.Add(status); Controls.Add(title);
+            pipEnabled.CheckedChanged+=(s,e)=>EditPip(p=>p.Enabled=pipEnabled.Checked);
+            pipTop.CheckedChanged+=(s,e)=>EditPip(p=>p.TopMost=pipTop.Checked);
+            pipLock.CheckedChanged+=(s,e)=>EditPip(p=>p.Locked=pipLock.Checked);
+            pipSize.SelectedIndexChanged+=(s,e)=> { var size=pipSize.SelectedItem as SizeChoice; if(size!=null)EditPip(p=> {p.Width=size.Size.Width;p.Height=size.Size.Height;}); };
+            pipRestore.Click+=(s,e)=>EditPip(p=>p.HasPosition=false);
+            wallEnabled.CheckedChanged+=(s,e)=>EditWallpaper();
+            wallCamera.SelectedIndexChanged+=(s,e)=>EditWallpaper();
+            wallMonitor.SelectedIndexChanged+=(s,e)=>EditWallpaper();
+            foreach(var r in new[]{wall30,wall60,wallFill,wallContain}) r.CheckedChanged+=(s,e)=> { if(((RadioButton)s).Checked)EditWallpaper(); };
+            ShowWallpaper();
             list.SelectedIndexChanged+=(s,e)=>ShowSelected();
             startup.Checked=config.AutoStart; startup.CheckedChanged+=(s,e)=> {
                 if(loading)return; try { Registration.Startup(startup.Checked); config.AutoStart=startup.Checked; Storage.Save(config); }
@@ -238,9 +275,101 @@ namespace MultiCam {
                 string error; errors.TryGetValue(c.Id,out error);
                 detail.Text="Identificação: "+c.IdentityKind+" · "+c.Id.Substring(0,8)+"\n"+
                     (c.IdentityKind=="serial do dispositivo"?"Nome associado ao serial informado pelo dispositivo.":"Sem serial USB único confirmado. Mantenha a placa na mesma porta; trocar de porta pode exigir renomear.")+"\n"+
-                    (String.IsNullOrEmpty(error)?"Selecione “"+c.Alias+" (Multi)” nos aplicativos. Ao trocar o modo, reabra a câmera nos aplicativos.":error);
+                    (String.IsNullOrEmpty(error)?"Selecione “"+c.Alias+" (Multi)” nos aplicativos. Ao trocar o modo, reabra a câmera nos aplicativos.":error)+
+                    (viewers.Status(c).StartsWith("Falhou")?"\nPiP: "+viewers.Status(c):"");
             } else { alias.Text=""; enabled.Checked=false; detail.Text="Conecte uma placa USB. As câmeras físicas e virtuais permanecem como entradas separadas nos aplicativos."; }
             loading=false;
+            ShowPip();
+        }
+        class SizeChoice { public Size Size; public override string ToString() { return Size.Width+" × "+Size.Height; } }
+        class CameraChoice { public Camera Camera; public override string ToString() { return Camera.Alias; } }
+        class MonitorChoice { public string Device,Text; public override string ToString() { return Text; } }
+        void ShowPip() {
+            var c=Selected; loading=true;
+            foreach(Control control in new Control[]{pipEnabled,pipTop,pipLock,pipSize,pipRestore}) control.Enabled=c!=null;
+            pipSize.Items.Clear();
+            if(c!=null) {
+                pipEnabled.Checked=c.Pip.Enabled; pipTop.Checked=c.Pip.TopMost; pipLock.Checked=c.Pip.Locked;
+                foreach(var size in ViewerSettings.Presets(c.Mode)) {
+                    pipSize.Items.Add(new SizeChoice {Size=size});
+                    if(size.Width==c.Pip.Width&&size.Height==c.Pip.Height)pipSize.SelectedIndex=pipSize.Items.Count-1;
+                }
+            } else { pipEnabled.Checked=pipTop.Checked=pipLock.Checked=false; }
+            loading=false;
+        }
+        void EditPip(Action<PipSettings> change) {
+            var c=Selected; if(loading||c==null)return;
+            change(c.Pip);
+            try { Storage.Save(config); } catch(Exception ex) { Storage.Log(ex.ToString()); }
+            ReconcileViewers();
+        }
+        static string MonitorText(Screen screen,int index) {
+            int w=screen.Bounds.Width,h=screen.Bounds.Height;
+            var mode=new DevMode(); mode.dmSize=(short)System.Runtime.InteropServices.Marshal.SizeOf(typeof(DevMode));
+            if(EnumDisplaySettings(screen.DeviceName,-1,ref mode)) { w=mode.dmPelsWidth; h=mode.dmPelsHeight; }
+            return "Monitor "+(index+1)+" · "+w+" × "+h+(screen.Primary?" (principal)":"");
+        }
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential,CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+        struct DevMode {
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr,SizeConst=32)] public string dmDeviceName;
+            public short dmSpecVersion,dmDriverVersion,dmSize,dmDriverExtra; public int dmFields,dmPositionX,dmPositionY,dmDisplayOrientation,dmDisplayFixedOutput;
+            public short dmColor,dmDuplex,dmYResolution,dmTTOption,dmCollate;
+            [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr,SizeConst=32)] public string dmFormName;
+            public short dmLogPixels; public int dmBitsPerPel,dmPelsWidth,dmPelsHeight,dmDisplayFlags,dmDisplayFrequency,dmICMMethod,dmICMIntent,dmMediaType,dmDitherType,dmReserved1,dmReserved2,dmPanningWidth,dmPanningHeight;
+        }
+        [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern bool EnumDisplaySettings(string device,int mode,ref DevMode info);
+        // Rebuilds the wallpaper controls from the settings (camera names and monitors may have changed).
+        void ShowWallpaper() {
+            var w=config.Wallpaper; loading=true;
+            wallEnabled.Checked=w.Enabled;
+            wallCamera.Items.Clear();
+            foreach(var c in config.Cameras) { wallCamera.Items.Add(new CameraChoice {Camera=c}); if(c.Id==w.CameraId)wallCamera.SelectedIndex=wallCamera.Items.Count-1; }
+            wallMonitor.Items.Clear();
+            var screens=Screen.AllScreens;
+            for(int i=0;i<screens.Length;i++) {
+                wallMonitor.Items.Add(new MonitorChoice {Device=screens[i].DeviceName,Text=MonitorText(screens[i],i)});
+                if(String.Equals(screens[i].DeviceName,w.Monitor,StringComparison.OrdinalIgnoreCase))wallMonitor.SelectedIndex=i;
+            }
+            wall30.Checked=w.Fps!=60; wall60.Checked=w.Fps==60;
+            wallFill.Checked=w.Fit!="contain"; wallContain.Checked=w.Fit=="contain";
+            loading=false;
+            ShowWallpaperStatus();
+        }
+        void ShowWallpaperStatus() {
+            var w=config.Wallpaper; string state=viewers.WallpaperStatus();
+            if(!w.Enabled) state="";
+            else if(state=="") {
+                int fps=viewers.WallpaperFps();
+                state=w.CameraId==null?"Escolha a câmera.":w.Monitor==null?"Escolha o monitor.":fps>0?"Desenhando "+fps+" FPS":"Aguardando a câmera…";
+            }
+            wallStatus.Text=state; wallStatus.ForeColor=state.StartsWith("Falhou")?Color.Firebrick:Color.DimGray;
+        }
+        void EditWallpaper() {
+            if(loading)return;
+            var w=config.Wallpaper;
+            w.Enabled=wallEnabled.Checked;
+            var camera=wallCamera.SelectedItem as CameraChoice; w.CameraId=camera==null?null:camera.Camera.Id;
+            if(w.Enabled && camera==null && Selected!=null) { w.CameraId=Selected.Id; }
+            var monitor=wallMonitor.SelectedItem as MonitorChoice; w.Monitor=monitor==null?null:monitor.Device;
+            if(w.Enabled && monitor==null) w.Monitor=Screen.PrimaryScreen.DeviceName;
+            w.Fps=wall60.Checked?60:30; w.Fit=wallContain.Checked?"contain":"fill";
+            try { Storage.Save(config); } catch(Exception ex) { Storage.Log(ex.ToString()); }
+            ShowWallpaper();
+            ReconcileViewers();
+        }
+        void ReconcileViewers() {
+            try {
+                if(viewers.Reconcile(config,c=> { Session s; return sessions.TryGetValue(c.Id,out s)&&s.Published; })) {
+                    Storage.Save(config);
+                    if(!pipSize.DroppedDown)ShowPip();
+                }
+            } catch(Exception ex) { Storage.Log(ex.ToString()); }
+            ShowWallpaperStatus();
+        }
+        static string Display(Camera c,Config config) {
+            bool pip=c.Pip!=null&&c.Pip.Enabled, wall=config.Wallpaper!=null&&config.Wallpaper.Enabled&&config.Wallpaper.CameraId==c.Id;
+            return pip&&wall?"PiP · Papel de parede":pip?"PiP":wall?"Papel de parede":"";
         }
         static Mode DefaultMode(List<Mode> values) {
             return values.OrderBy(m=>m.Width==1920&&m.Height==1080?0:1).ThenBy(m=>Math.Abs(m.Fps-60))
@@ -304,6 +433,8 @@ namespace MultiCam {
                     } catch(Exception ex) {errors[c.Id]=ex.Message;retry[c.Id]=DateTime.UtcNow.AddSeconds(10);Storage.Log(ex.ToString());}
                 }
                 if(changed)Storage.Save(config);
+                if(changed && wallCamera.Items.Count!=config.Cameras.Count && !wallCamera.DroppedDown)ShowWallpaper();
+                ReconcileViewers();
                 RenderList();status.Text=devices.Count+" placa(s) USB · "+sessions.Values.Count(s=>s.Published)+" compartilhada(s) · Fechar a janela mantém o programa na bandeja.";
             } catch(Exception ex) {status.Text=ex.Message;Storage.Log(ex.ToString());}
             finally {busy=false;if(closePending)ExitApp();}
@@ -313,7 +444,8 @@ namespace MultiCam {
             foreach(var c in config.Cameras) {
                 Session s;sessions.TryGetValue(c.Id,out s);
                 string state=!connected.Contains(c.Identity)?"Desconectada":!c.Enabled?"Desativada":s!=null?(s.Published?"Compartilhando":"Iniciando…"):errors.ContainsKey(c.Id)?"Precisa de atenção":"Detectada";
-                var values=new[]{c.Alias+" (Multi)",c.LastName,state,c.Mode==null?"Selecione um modo":c.Mode.ToString(),s==null?"—":Interlocked.Read(ref s.Fps).ToString()};
+                string view=Display(c,config); string viewState=viewers.Status(c); if(viewState.StartsWith("Falhou"))view="PiP falhou";
+                var values=new[]{c.Alias+" (Multi)",c.LastName,state,c.Mode==null?"Selecione um modo":c.Mode.ToString(),s==null?"—":Interlocked.Read(ref s.Fps).ToString(),view};
                 var item=list.Items.Cast<ListViewItem>().FirstOrDefault(v=>((Camera)v.Tag).Id==c.Id);
                 if(item==null) {item=new ListViewItem(values){Tag=c};list.Items.Add(item);}
                 else for(int i=0;i<values.Length;i++)item.SubItems[i].Text=values[i];
@@ -330,6 +462,7 @@ namespace MultiCam {
             try {Stop(c);c.Alias=name;c.Enabled=enabled.Checked;if(mode!=null)c.Mode=mode;Storage.Save(config);errors.Remove(c.Id);retry.Remove(c.Id);}
             catch(Exception ex){MessageBox.Show(this,ex.Message,"MultiCam");}
             finally {busy=false;}
+            ShowWallpaper();
             await RefreshCameras();
         }
         async Task ReloadModes() {
@@ -339,7 +472,7 @@ namespace MultiCam {
             finally{busy=false;ShowSelected();}
             await RefreshCameras();
         }
-        void Cleanup() {timer.Stop();foreach(var c in config.Cameras)try{Stop(c);}catch(Exception ex){Storage.Log(ex.Message);}if(tray!=null)tray.Visible=false;}
+        void Cleanup() {timer.Stop();try{viewers.StopAll();}catch(Exception ex){Storage.Log(ex.Message);}foreach(var c in config.Cameras)try{Stop(c);}catch(Exception ex){Storage.Log(ex.Message);}if(tray!=null)tray.Visible=false;}
         void ExitApp() {if(busy){closePending=true;return;}exiting=true;Cleanup();Close();Application.Exit();}
     }
     static class Program {
