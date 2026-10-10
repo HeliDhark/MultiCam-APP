@@ -35,9 +35,14 @@ public static class Win {
     [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hWnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
 
+# Pixels físicos em GetWindowRect e Screen, como o viewer (que é per-monitor aware).
+[void][Win]::SetProcessDPIAware()
+Add-Type -AssemblyName System.Windows.Forms
 $failures = 0
 function Pass($name) { Write-Host "PASS $name" }
 function Fail($name, $why) { $script:failures++; Write-Host "FAIL $name : $why" }
@@ -141,12 +146,99 @@ function Test-BadArgs {
     if ($p.ExitCode -eq 2) { Pass $name } else { Fail $name "código $($p.ExitCode)" }
 }
 
+# ---------------------------------------------------------------- papel de parede
+$primary = [System.Windows.Forms.Screen]::PrimaryScreen
+function Read-BmpPixel([string]$path, [int]$x, [int]$y) {
+    $b = [IO.File]::ReadAllBytes($path)
+    $w = [BitConverter]::ToInt32($b, 18); $h = [BitConverter]::ToInt32($b, 22); $off = [BitConverter]::ToInt32($b, 10)
+    $row = (($w * 3 + 3) -band -4)
+    $i = $off + ([Math]::Abs($h) - 1 - $y) * $row + $x * 3
+    return [pscustomobject]@{ W = $w; H = [Math]::Abs($h); R = $b[$i + 2]; G = $b[$i + 1]; B = $b[$i] }
+}
+function Start-Wallpaper($id, $fps, $fit, $parentPid, $extra = '') {
+    return [VProc]::Start($viewerExe, "--wallpaper $id `"$($primary.DeviceName)`" $fps $fit $parentPid $extra")
+}
+function Test-WallpaperAttaches {
+    $name = 'wallpaper_attaches'; $id = New-Id; $v = $null; $p = $null
+    try {
+        $p = Start-Producer $id 640 360 6
+        $v = Start-Wallpaper $id 60 fill $PID
+        $ready = Wait-Event $v 'ready' 5
+        if (-not $ready) { return Fail $name "sem evento ready (código $(if ($v.P.HasExited) { $v.P.ExitCode }), $($v.Err))" }
+        $parent = [Win]::GetParent([IntPtr][int64]$ready.Hwnd)
+        $cls = New-Object System.Text.StringBuilder 64
+        [void][Win]::GetClassName($parent, $cls, 64)
+        $v.P.StandardInput.WriteLine('quit')
+        if (-not $v.P.WaitForExit(3000)) { return Fail $name 'quit não encerrou em 3 s' }
+        if ($cls.ToString() -eq 'WorkerW' -and $v.P.ExitCode -eq 0) { Pass $name } else { Fail $name "pai=$cls código=$($v.P.ExitCode)" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
+}
+function Test-WallpaperFps([int]$fps, [int]$low, [int]$high) {
+    $name = "wallpaper_fps_$fps"; $id = New-Id; $v = $null; $p = $null
+    try {
+        $p = Start-Producer $id 640 360 9
+        $v = Start-Wallpaper $id $fps fill $PID
+        if (-not (Wait-Event $v 'ready' 5)) { return Fail $name 'sem evento ready' }
+        Start-Sleep -Seconds 7
+        $stats = @(Get-Events $v | Where-Object { $_.Event -eq 'stats' } | Select-Object -Skip 1 | ForEach-Object { [int]$_.Fps })
+        $v.P.StandardInput.WriteLine('quit'); [void]$v.P.WaitForExit(3000)
+        if ($stats.Count -lt 3) { return Fail $name "só $($stats.Count) eventos stats" }
+        $avg = ($stats | Measure-Object -Average).Average
+        if ($avg -ge $low -and $avg -le $high) { Pass "$name (média $([Math]::Round($avg, 1)))" } else { Fail $name "média $avg fora de [$low,$high]: $($stats -join ',')" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
+}
+function Test-WallpaperSnapshot {
+    $name = 'wallpaper_snapshot'; $id = New-Id; $v = $null; $p = $null
+    $bmp = Join-Path $env:TEMP "mc-wall-$([guid]::NewGuid()).bmp"
+    try {
+        $p = Start-Producer $id 640 360 6
+        $v = Start-Wallpaper $id 60 contain $PID "--snapshot `"$bmp`""
+        if (-not $v.P.WaitForExit(10000)) { return Fail $name 'viewer não saiu em 10 s' }
+        if ($v.P.ExitCode -ne 0) { return Fail $name "código $($v.P.ExitCode) $($v.Err)" }
+        $bw = $primary.Bounds.Width; $bh = $primary.Bounds.Height
+        $px = Read-BmpPixel $bmp ([int]($bw / 2)) ([int]($bh / 2))
+        if ($px.W -ne $bw -or $px.H -ne $bh) { return Fail $name "BMP $($px.W)x$($px.H), monitor ${bw}x${bh}" }
+        if ($px.R -ge 247 -and $px.G -le 8 -and $px.B -le 8) { Pass $name } else { Fail $name "pixel central R=$($px.R) G=$($px.G) B=$($px.B)" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() }; Remove-Item $bmp -ErrorAction SilentlyContinue }
+}
+function Test-WallpaperMonitorMissing {
+    $name = 'wallpaper_monitor_missing'; $v = $null
+    try {
+        $v = [VProc]::Start($viewerExe, "--wallpaper $(New-Id) \\.\DISPLAY99 30 fill $PID")
+        if (-not $v.P.WaitForExit(3000)) { return Fail $name 'não saiu em 3 s' }
+        Start-Sleep -Milliseconds 200
+        if ($v.P.ExitCode -eq 4 -and $v.Err.ToString() -match 'monitor') { Pass $name } else { Fail $name "código $($v.P.ExitCode), stderr: $($v.Err)" }
+    } finally { Stop-Viewer $v }
+}
+function Test-WallpaperParentExit {
+    $name = 'wallpaper_parent_exit'; $v = $null; $id = New-Id; $p = $null
+    $parent = Start-Process -FilePath cmd.exe -ArgumentList '/c', 'ping -n 4 127.0.0.1 >nul' -PassThru -WindowStyle Hidden
+    try {
+        $p = Start-Producer $id 640 360 6
+        $v = Start-Wallpaper $id 30 fill $parent.Id
+        $ready = Wait-Event $v 'ready' 5
+        if (-not $ready) { return Fail $name 'sem evento ready' }
+        $hwnd = [IntPtr][int64]$ready.Hwnd
+        $parent.WaitForExit()
+        if (-not $v.P.WaitForExit(3000)) { return Fail $name 'viewer não saiu em 3 s' }
+        if ($v.P.ExitCode -eq 0 -and -not [Win]::IsWindow($hwnd)) { Pass $name } else { Fail $name "código $($v.P.ExitCode), janela ainda existe: $([Win]::IsWindow($hwnd))" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
+}
+
 Test-PipSnapshotColor
 Test-PipLockHittest
 Test-PipModeChange
 Test-ParentExit
 Test-GarbageStdin
 Test-BadArgs
+
+Write-Host 'Aviso: a área de trabalho muda por alguns segundos nos testes de papel de parede.'
+Test-WallpaperAttaches
+Test-WallpaperFps 30 26 32
+Test-WallpaperFps 60 52 62
+Test-WallpaperSnapshot
+Test-WallpaperMonitorMissing
+Test-WallpaperParentExit
 
 if ($failures) { Write-Host "FAIL ($failures)"; exit 1 }
 Write-Host 'PASS'

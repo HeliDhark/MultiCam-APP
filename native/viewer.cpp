@@ -1,11 +1,14 @@
-// MultiCam.Viewer: reads a camera channel and shows it in a borderless PiP window.
+// MultiCam.Viewer: reads a camera channel and shows it in a borderless PiP window (--pip)
+// or as a live desktop wallpaper behind the icons (--wallpaper).
 // Protocol: commands on stdin (see viewer::parseCommand), JSON events on stdout, one per line.
-// Exit codes: 0 normal, 1 snapshot timeout, 2 invalid arguments, 3 Direct3D failure.
+// Exit codes: 0 normal, 1 snapshot timeout, 2 invalid arguments, 3 Direct3D failure,
+// 4 monitor not found, 5 could not attach behind the desktop icons (WorkerW).
 #include <windows.h>
 #include <windowsx.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <mmsystem.h>
+#include <wtsapi32.h>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -18,6 +21,7 @@
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "wtsapi32.lib")
 
 namespace {
 
@@ -150,7 +154,67 @@ struct Options {
     bool topMost = false, locked = false;
     DWORD parentPid = 0;
     std::wstring snapshot;
+    // Wallpaper mode.
+    bool wallpaper = false;
+    std::wstring monitor;
+    int fps = 60;
+    viewer::Fit fit = viewer::Fit::Fill;
 };
+
+double nowMs() {
+    static LARGE_INTEGER frequency = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return double(counter.QuadPart) * 1000.0 / double(frequency.QuadPart);
+}
+
+// Monitor rectangle (virtual-screen pixels) by Windows device name, e.g. \\.\DISPLAY1.
+bool findMonitor(const std::wstring& device, RECT& rect) {
+    struct Search { const std::wstring* device; RECT rect; bool found; } search{&device, {}, false};
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        auto* s = reinterpret_cast<Search*>(data);
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, &info) && _wcsicmp(info.szDevice, s->device->c_str()) == 0) {
+            s->rect = info.rcMonitor; s->found = true; return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    rect = search.rect;
+    return search.found;
+}
+
+// The WorkerW that Explorer puts between the wallpaper and the icons (Windows 10).
+HWND findWorkerW() {
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (!progman) return nullptr;
+    DWORD_PTR result = 0;
+    SendMessageTimeoutW(progman, 0x052C, 0xD, 1, SMTO_NORMAL, 1000, &result);
+    HWND worker = nullptr;
+    EnumWindows([](HWND top, LPARAM data) -> BOOL {
+        if (FindWindowExW(top, nullptr, L"SHELLDLL_DefView", nullptr)) {
+            *reinterpret_cast<HWND*>(data) = FindWindowExW(nullptr, top, L"WorkerW", nullptr);
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&worker));
+    return worker;
+}
+
+// A foreground window (not the shell, not us) that covers the whole monitor.
+bool fullscreenOver(const RECT& monitor) {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    if (pid == GetCurrentProcessId()) return false;
+    wchar_t cls[64]{};
+    GetClassNameW(fg, cls, 64);
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    RECT r{};
+    if (!GetWindowRect(fg, &r)) return false;
+    return r.left <= monitor.left && r.top <= monitor.top && r.right >= monitor.right && r.bottom >= monitor.bottom;
+}
 
 struct Viewer {
     Options opt;
@@ -163,6 +227,8 @@ struct Viewer {
     int drawn = 0;
     bool quit = false;
     int exitCode = 0;
+    bool paused = false, sessionLocked = false;
+    double lastDraw = -1e9;
 
     viewer::Rect windowRect() const {
         RECT r{};
@@ -184,7 +250,7 @@ struct Viewer {
     }
 
     void redraw() {
-        renderer.draw(viewer::Fit::Fill);
+        renderer.draw(opt.fit);
         renderer.present();
     }
 
@@ -216,6 +282,7 @@ struct Viewer {
         char buffer[96];
         std::snprintf(buffer, sizeof(buffer), "{\"Event\":\"source\",\"Width\":%u,\"Height\":%u}", w, h);
         emit(buffer);
+        if (opt.wallpaper) return;  // the wallpaper always covers its monitor
         viewer::Rect r = windowRect();
         const viewer::Size s = viewer::keepAspect({r.w, r.h}, source(), true, MinPip, MaxPip);
         r.w = s.w; r.h = s.h;
@@ -234,7 +301,13 @@ struct Viewer {
         if (channel.peekSize(w, h)) {
             if (w != srcW || h != srcH) sourceChanged(w, h);
             if (channel.read(w, h) == multi::Channel::Read::Updated && channel.hasFrame(size_t(w) * h * 2)) {
+                // The wallpaper draws at most `fps` frames per second (3/4 of the period absorbs
+                // jitter of the source); a paused wallpaper keeps the frame but draws nothing.
+                const double t = nowMs();
+                const double period = opt.wallpaper ? 750.0 / opt.fps : 0.0;
+                if (paused || (picture && t - lastDraw < period)) { lastFrame = now; return false; }
                 if (renderer.upload(channel.frame(), int(w), int(h))) {
+                    lastDraw = t;
                     picture = true;
                     lastFrame = now;
                     redraw();
@@ -259,7 +332,7 @@ struct Viewer {
         if (!off.init(nullptr, error)) return false;
         off.resize(rc.right - rc.left, rc.bottom - rc.top);
         if (!off.upload(channel.frame(), int(srcW), int(srcH))) return false;
-        off.draw(viewer::Fit::Fill);
+        off.draw(opt.fit);
         std::vector<uint8_t> bgra;
         int w = 0, h = 0;
         return off.readback(bgra, w, h) && writeBmp(opt.snapshot, bgra, w, h);
@@ -298,6 +371,27 @@ LRESULT hitCode(viewer::Hit hit) {
 }
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (app.opt.wallpaper) {
+        switch (msg) {
+        case WM_SIZE:
+            if (app.hwnd) { app.renderer.resize(LOWORD(lp), HIWORD(lp)); app.redraw(); }
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            if (app.hwnd) app.redraw();
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_WTSSESSION_CHANGE:
+            if (wp == WTS_SESSION_LOCK) app.sessionLocked = true;
+            else if (wp == WTS_SESSION_UNLOCK) app.sessionLocked = false;
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
     switch (msg) {
     case WM_NCHITTEST: {
         RECT r{};
@@ -345,11 +439,33 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int usage() {
-    fail(L"uso: MultiCam.Viewer.exe --pip <guid> <x> <y> <w> <h> <topmost 0|1> <locked 0|1> <parentPid> [--snapshot <arquivo.bmp>]");
+    fail(L"uso: MultiCam.Viewer.exe --pip <guid> <x> <y> <w> <h> <topmost 0|1> <locked 0|1> <parentPid> [--snapshot <arquivo.bmp>]\n"
+         L"     MultiCam.Viewer.exe --wallpaper <guid> <monitor> <fps 30|60> <fill|contain> <parentPid> [--snapshot <arquivo.bmp>]");
     return 2;
 }
 
+bool parseWallpaper(int argc, wchar_t** argv, Options& o) {
+    if (argc != 7 && argc != 9) return false;
+    o.wallpaper = true;
+    o.camera = argv[2];
+    o.monitor = argv[3];
+    int parent = 0;
+    if (!parseGuid(argv[2]) || o.monitor.empty() || !parseInt(argv[4], o.fps) || (o.fps != 30 && o.fps != 60) ||
+        !parseInt(argv[6], parent) || parent <= 0)
+        return false;
+    if (wcscmp(argv[5], L"fill") == 0) o.fit = viewer::Fit::Fill;
+    else if (wcscmp(argv[5], L"contain") == 0) o.fit = viewer::Fit::Contain;
+    else return false;
+    o.parentPid = DWORD(parent);
+    if (argc == 9) {
+        if (wcscmp(argv[7], L"--snapshot") != 0) return false;
+        o.snapshot = argv[8];
+    }
+    return true;
+}
+
 bool parseArgs(int argc, wchar_t** argv, Options& o) {
+    if (argc >= 2 && wcscmp(argv[1], L"--wallpaper") == 0) return parseWallpaper(argc, argv, o);
     if (argc < 10 || wcscmp(argv[1], L"--pip") != 0) return false;
     o.camera = argv[2];
     int parent = 0;
@@ -384,17 +500,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = L"MultiCamPip";
     RegisterClassExW(&wc);
 
-    viewer::Rect r = app.opt.rect;
-    r.w = std::max(MinPip.w, std::min(MaxPip.w, r.w));
-    r.h = std::max(MinPip.h, std::min(MaxPip.h, r.h));
-    r = viewer::clampToMonitors(r, monitors());
-    const DWORD exStyle = WS_EX_TOOLWINDOW | (app.opt.topMost ? WS_EX_TOPMOST : 0);
-    HWND hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"MultiCam PiP", WS_POPUP, r.x, r.y, r.w, r.h, nullptr, nullptr, instance, nullptr);
-    if (!hwnd) { fail(L"Não foi possível criar a janela."); return 3; }
+    HWND hwnd = nullptr;
+    RECT monitor{};
+    wchar_t savedWallpaper[MAX_PATH]{};
+    if (app.opt.wallpaper) {
+        if (!findMonitor(app.opt.monitor, monitor)) { fail(L"monitor não encontrado: " + app.opt.monitor); return 4; }
+        HWND worker = findWorkerW();
+        if (!worker) {
+            fail(L"Não foi possível ancorar o papel de parede atrás dos ícones (WorkerW não encontrada). "
+                 L"Esta versão do Windows não é suportada pelo modo papel de parede.");
+            return 5;
+        }
+        SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, savedWallpaper, 0);
+        POINT origin{monitor.left, monitor.top};
+        ScreenToClient(worker, &origin);
+        hwnd = CreateWindowExW(WS_EX_NOACTIVATE, wc.lpszClassName, L"MultiCam Wallpaper", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                               origin.x, origin.y, monitor.right - monitor.left, monitor.bottom - monitor.top, worker, nullptr, instance, nullptr);
+        if (!hwnd) { fail(L"Não foi possível criar a janela do papel de parede (WorkerW)."); return 5; }
+        WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+    } else {
+        viewer::Rect r = app.opt.rect;
+        r.w = std::max(MinPip.w, std::min(MaxPip.w, r.w));
+        r.h = std::max(MinPip.h, std::min(MaxPip.h, r.h));
+        r = viewer::clampToMonitors(r, monitors());
+        const DWORD exStyle = WS_EX_TOOLWINDOW | (app.opt.topMost ? WS_EX_TOPMOST : 0);
+        hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"MultiCam PiP", WS_POPUP, r.x, r.y, r.w, r.h, nullptr, nullptr, instance, nullptr);
+        if (!hwnd) { fail(L"Não foi possível criar a janela."); return 3; }
+    }
     std::wstring error;
     if (!app.renderer.init(hwnd, error)) { fail(error); DestroyWindow(hwnd); return 3; }
     app.hwnd = hwnd;
-    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    if (!app.opt.wallpaper) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     app.redraw();
 
     char ready[64];
@@ -403,7 +539,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (HANDLE t = CreateThread(nullptr, 0, readInput, nullptr, 0, nullptr)) CloseHandle(t);
 
     const ULONGLONG start = GetTickCount64();
-    ULONGLONG lastStats = start;
+    ULONGLONG lastStats = start, lastFullscreenCheck = 0;
+    bool fullscreen = false;
     HANDLE waits[] = {parent, input.ready};
     while (!app.quit) {
         const DWORD w = MsgWaitForMultipleObjects(2, waits, FALSE, 4, QS_ALLINPUT);
@@ -418,6 +555,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (app.quit) break;
 
         const ULONGLONG now = GetTickCount64();
+        if (app.opt.wallpaper) {
+            if (now - lastFullscreenCheck >= 500) { fullscreen = fullscreenOver(monitor); lastFullscreenCheck = now; }
+            app.paused = app.opt.snapshot.empty() && (fullscreen || app.sessionLocked);
+        }
         const bool drew = app.poll(now);
         if (drew && !app.opt.snapshot.empty()) {
             app.exitCode = app.snapshot() ? 0 : 1;
@@ -430,7 +571,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             lastStats = now;
         }
     }
-    DestroyWindow(hwnd);
+    if (app.opt.wallpaper) {
+        WTSUnRegisterSessionNotification(hwnd);
+        HWND worker = GetParent(hwnd);
+        DestroyWindow(hwnd);
+        if (worker) RedrawWindow(worker, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        // Ask Windows to paint the user's own wallpaper again, without touching the saved setting.
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, savedWallpaper, 0);
+    } else {
+        DestroyWindow(hwnd);
+    }
     timeEndPeriod(1);
     CloseHandle(parent);
     return app.exitCode;
