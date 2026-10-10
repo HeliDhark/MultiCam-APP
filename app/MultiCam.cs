@@ -37,8 +37,9 @@ namespace MultiCam {
         public bool Enabled = true;
         public Mode Mode;
         public List<Mode> Modes = new List<Mode>();
+        public PipSettings Pip = new PipSettings();
     }
-    public class Config { public bool AutoStart; public List<Camera> Cameras = new List<Camera>(); }
+    public class Config { public bool AutoStart; public List<Camera> Cameras = new List<Camera>(); public WallpaperSettings Wallpaper = new WallpaperSettings(); }
     public class Stats { public long Frames, Fps, Dropped; }
     public static class Storage {
         public static readonly string Root=System.IO.Path.GetDirectoryName(typeof(Storage).Assembly.Location);
@@ -47,10 +48,11 @@ namespace MultiCam {
         public static Config Load() {
             Directory.CreateDirectory(Data);
             var path=System.IO.Path.Combine(Data,"settings.json");
-            if (!File.Exists(path)) return new Config();
+            if (!File.Exists(path)) { var fresh=new Config(); ViewerSettings.Normalize(fresh); return fresh; }
             var config=Json.Deserialize<Config>(File.ReadAllText(path,Encoding.UTF8));
             if (config==null || config.Cameras==null) throw new InvalidDataException("Configuração inválida. Restaure data/settings.json.bak.");
             foreach (var c in config.Cameras) { Guid.Parse(c.Id); if(c.Modes==null)c.Modes=new List<Mode>(); }
+            ViewerSettings.Normalize(config);
             return config;
         }
         public static void Save(Config config) {

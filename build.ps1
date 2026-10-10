@@ -64,10 +64,11 @@ $env:PATH = $savedPath; $env:INCLUDE = $savedInclude; $env:LIB = $savedLib
 $csc = "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 Copy-Item -LiteralPath "$taskRoot/third_party/turbojpeg/x64/turbojpeg.dll" -Destination "$taskRoot/dist/x64/turbojpeg.dll"
 $panelSource = [IO.Path]::GetFullPath((Join-Path $taskRoot 'app/MultiCam.cs'))
+$viewersSource = [IO.Path]::GetFullPath((Join-Path $taskRoot 'app/Viewers.cs'))
 $panelTarget = [IO.Path]::GetFullPath((Join-Path $taskRoot 'dist/MultiCam.exe'))
 $panelIcon = [IO.Path]::GetFullPath((Join-Path $taskRoot 'app/assets/multicam.ico'))
 $panelResponse = Join-Path $taskRoot 'build/panel.rsp'
-@('/nologo','/target:winexe','/platform:x64','/optimize+','/utf8output','/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll',('/win32icon:"'+$panelIcon+'"'),('/out:"'+$panelTarget+'"'),('"'+$panelSource+'"')) | Set-Content $panelResponse
+@('/nologo','/target:winexe','/platform:x64','/optimize+','/utf8output','/r:System.Windows.Forms.dll','/r:System.Drawing.dll','/r:System.Web.Extensions.dll',('/win32icon:"'+$panelIcon+'"'),('/out:"'+$panelTarget+'"'),('"'+$panelSource+'"'),('"'+$viewersSource+'"')) | Set-Content $panelResponse
 Invoke-BuildTool $csc @('@'+$panelResponse)
 Copy-Item -LiteralPath "$taskRoot/README.md" -Destination "$taskRoot/dist/LEIA-ME.md"
 Copy-Item -LiteralPath "$taskRoot/third_party/libdshowcapture/COPYING" -Destination "$taskRoot/dist/LICENSE-libdshowcapture.txt"
