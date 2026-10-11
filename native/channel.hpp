@@ -117,6 +117,36 @@ public:
         }
         return frame_.empty() ? Read::NoFrame : Read::Unchanged;
     }
+    // Reader. Sequence of the newest published frame (0 when there is none) and the source
+    // frame interval. Cheap, no copy: lets a client wait for a new frame instead of a timer.
+    uint32_t latest() {
+        if (!view_) return 0;
+        auto hdr = header();
+        return hdr->magic == Magic && hdr->active ? hdr->published : 0;
+    }
+    int64_t sourceInterval() { return view_ && header()->magic == Magic ? header()->interval : 0; }
+    // Reader without a private copy (one 4 MB copy less per 1080p frame and client): copies
+    // frame `sequence`, or the newest one when it is 0, straight into dst. A frame stays in
+    // its slot until the writer publishes two more, so the last one can be copied again to
+    // repeat it while the source is stalled. False when the frame is gone, has another size
+    // or was overwritten during the copy (dst is then garbage).
+    bool copyTo(uint8_t* dst, uint32_t w, uint32_t h, uint32_t& sequence) {
+        if (!view_) return false;
+        auto hdr = header();
+        if (hdr->magic != Magic || !hdr->active) return false;
+        const uint32_t bytes = w * h * 2;
+        if (hdr->width != w || hdr->height != h || hdr->bytes != bytes || bytes > Capacity) return false;
+        const uint32_t newest = hdr->published; MemoryBarrier();
+        const uint32_t wanted = sequence ? sequence : newest;
+        if (!wanted || uint32_t(newest - wanted) > 1) return false;
+        memcpy(dst, slot(wanted), bytes);
+        MemoryBarrier();
+        if (uint32_t(hdr->published - wanted) > 1 || hdr->width != w || hdr->height != h) return false;
+        sequence = wanted;
+        return true;
+    }
+    // Sequence of the frame kept by read().
+    uint32_t sequence() const { return seq_; }
     bool hasFrame(size_t bytes) const { return frame_.size() == bytes; }
     const uint8_t* frame() const { return frame_.data(); }
 };

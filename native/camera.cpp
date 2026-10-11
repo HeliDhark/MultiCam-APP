@@ -25,37 +25,62 @@ class Camera final : public DShow::OutputFilter {
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<REFERENCE_TIME> graphStart_{0};
+    // Frames go out when the source publishes them, not on a timer of our own: a timer
+    // drifts against the card's clock and repeats one frame and skips the next (judder).
+    // A client slower than the source gets every `step`-th source frame (30 of 60).
     void stream() {
+        using Clock=std::chrono::steady_clock;
         CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         timeBeginPeriod(1);
-        auto next=std::chrono::steady_clock::now();
         REFERENCE_TIME timestamp=0, previousTimestamp=-1;
         const auto hold=std::chrono::milliseconds(500);
-        std::chrono::steady_clock::time_point lastNew{};
+        Clock::time_point lastNew{}, lastOpen{}, lastSent=Clock::now();
+        uint32_t sent=0;
+        bool repeating=false;
         while (WaitForSingleObject(stop_,0)!=WAIT_OBJECT_0) {
             const auto interval=GetInterval();
+            const auto period=std::chrono::nanoseconds(interval*100);
             const int w=GetCX(), h=GetCY();
+            const size_t bytes=size_t(w)*h*2;
+            auto now=Clock::now();
+            if (!channel_.valid() && now-lastOpen>=std::chrono::milliseconds(100)) { lastOpen=now; channel_.open(id_,false); }
+            bool fresh=false;
+            if (channel_.valid()) {
+                const uint32_t latest=channel_.latest();
+                const int64_t source=channel_.sourceInterval();
+                const uint32_t step=source>0 ? uint32_t(std::max<long long>(1,std::llround(double(interval)/double(source)))) : 1;
+                // Late source: take what there is after 1.5 periods rather than drop the rate further.
+                fresh=latest && latest!=sent && (!sent || latest-sent>=step || now-lastSent>=period*3/2);
+            }
+            // Without new frames keep the stream alive at the client's rate: repeat the last
+            // frame (a driver hiccup, a worker restart), and black once the source has been
+            // gone for a while. The first repeat waits 1.5 periods so a late frame is not doubled.
+            if (!fresh && now-lastSent<(repeating ? period : period*3/2)) {
+                // Sleep through most of the period and poll every 1 ms only near the next frame.
+                const auto quiet=std::chrono::duration_cast<std::chrono::milliseconds>(lastSent+period-std::chrono::milliseconds(4)-now).count();
+                if (WaitForSingleObject(stop_,quiet>1 ? DWORD(quiet) : 1)==WAIT_OBJECT_0) break;
+                continue;
+            }
+            repeating=!fresh;
             BYTE* target=nullptr;
             if (LockSampleData(&target)) {
-                if (!channel_.valid()) channel_.open(id_,false);
-                const size_t bytes=size_t(w)*h*2;
+                // Copied straight from shared memory into the sample: the newest frame, or the
+                // last one again (it stays in its slot while the source is stalled).
                 bool received=false;
-                if (channel_.valid()) {
-                    auto status=channel_.read(uint32_t(w),uint32_t(h));
-                    auto now=std::chrono::steady_clock::now();
-                    if (status==multi::Channel::Read::Updated) lastNew=now;
-                    // Repeat the last complete frame through short gaps (a driver hiccup,
-                    // a worker restart) instead of flashing black.
-                    received=channel_.hasFrame(bytes) && now-lastNew<=hold;
+                if (fresh) {
+                    uint32_t newest=0;
+                    received=channel_.copyTo(target,uint32_t(w),uint32_t(h),newest);
+                    if (received) { sent=newest; lastNew=now; }
+                    else sent=channel_.latest();  // torn or resized: never retry this one
                 }
-                if (received) memcpy(target,channel_.frame(),bytes);
+                if (!received && sent && now-lastNew<=hold) { uint32_t again=sent; received=channel_.copyTo(target,uint32_t(w),uint32_t(h),again); }
                 // Black YUY2 only after the source has been gone for a while, never keep exposing a stale private frame.
-                else {
+                if (!received) {
                     for (size_t i=0; i<bytes; i+=4) { target[i]=16; target[i+1]=128; target[i+2]=16; target[i+3]=128; }
                 }
                 if (running_ && clock) {
-                    REFERENCE_TIME now=0;
-                    if (SUCCEEDED(clock->GetTime(&now))) timestamp=std::max<REFERENCE_TIME>(0,now-graphStart_);
+                    REFERENCE_TIME graphNow=0;
+                    if (SUCCEEDED(clock->GetTime(&graphNow))) timestamp=std::max<REFERENCE_TIME>(0,graphNow-graphStart_);
                 }
                 // Preroll can precede Run's clock origin, and coarse clock
                 // readings can repeat. Keep delivered timestamps increasing.
@@ -64,11 +89,7 @@ class Camera final : public DShow::OutputFilter {
                 UnlockSampleData(timestamp,timestamp+interval);
                 timestamp+=interval;
             }
-            next+=std::chrono::nanoseconds(interval*100);
-            auto now=std::chrono::steady_clock::now();
-            if (next<now-std::chrono::milliseconds(100)) next=now;
-            auto wait=std::chrono::duration_cast<std::chrono::milliseconds>(next-now).count();
-            if (wait>0 && WaitForSingleObject(stop_,DWORD(wait))==WAIT_OBJECT_0) break;
+            lastSent=now;
         }
         timeEndPeriod(1); CoUninitialize();
     }
