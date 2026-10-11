@@ -36,6 +36,7 @@ public static class Win {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int w, int h, bool repaint);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
@@ -224,6 +225,39 @@ function Test-WallpaperParentExit {
         if ($v.P.ExitCode -eq 0 -and -not [Win]::IsWindow($hwnd)) { Pass $name } else { Fail $name "código $($v.P.ExitCode), janela ainda existe: $([Win]::IsWindow($hwnd))" }
     } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
 }
+# Explorer reiniciado destrói a WorkerW e a nossa janela junto: o viewer precisa sair com 6 para o painel reiniciá-lo.
+function Test-WallpaperWindowLost {
+    $name = 'wallpaper_window_lost'; $id = New-Id; $v = $null; $p = $null
+    try {
+        $p = Start-Producer $id 640 360 6
+        $v = Start-Wallpaper $id 30 fill $PID
+        $ready = Wait-Event $v 'ready' 5
+        if (-not $ready) { return Fail $name 'sem evento ready' }
+        [void][Win]::SendMessage([IntPtr][int64]$ready.Hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)  # WM_CLOSE destrói a janela
+        if (-not $v.P.WaitForExit(3000)) { return Fail $name 'viewer continuou rodando sem a janela' }
+        if ($v.P.ExitCode -eq 6) { Pass $name } else { Fail $name "código $($v.P.ExitCode)" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
+}
+# Resolução, escala ou arranjo de monitores mudou: o papel de parede volta a cobrir o monitor sozinho.
+function Test-WallpaperKeepsPlace {
+    $name = 'wallpaper_keeps_place'; $id = New-Id; $v = $null; $p = $null
+    try {
+        $p = Start-Producer $id 640 360 6
+        $v = Start-Wallpaper $id 30 fill $PID
+        $ready = Wait-Event $v 'ready' 5
+        if (-not $ready) { return Fail $name 'sem evento ready' }
+        $hwnd = [IntPtr][int64]$ready.Hwnd
+        [void][Win]::MoveWindow($hwnd, 10, 10, 200, 150, $true)
+        $b = $primary.Bounds; $r = New-Object Win+RECT
+        $deadline = [DateTime]::UtcNow.AddSeconds(3)
+        do {
+            Start-Sleep -Milliseconds 100
+            [void][Win]::GetWindowRect($hwnd, [ref]$r)
+            $ok = $r.Left -eq $b.Left -and $r.Top -eq $b.Top -and $r.Right -eq $b.Right -and $r.Bottom -eq $b.Bottom
+        } while (-not $ok -and [DateTime]::UtcNow -lt $deadline)
+        if ($ok) { Pass $name } else { Fail $name "janela em $($r.Left),$($r.Top)-$($r.Right),$($r.Bottom), monitor $b" }
+    } finally { Stop-Viewer $v; if ($p -and -not $p.HasExited) { $p.Kill() } }
+}
 
 Test-PipSnapshotColor
 Test-PipLockHittest
@@ -239,6 +273,8 @@ Test-WallpaperFps 60 52 62
 Test-WallpaperSnapshot
 Test-WallpaperMonitorMissing
 Test-WallpaperParentExit
+Test-WallpaperWindowLost
+Test-WallpaperKeepsPlace
 
 if ($failures) { Write-Host "FAIL ($failures)"; exit 1 }
 Write-Host 'PASS'

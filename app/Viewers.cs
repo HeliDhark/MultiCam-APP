@@ -154,6 +154,8 @@ namespace MultiCam {
             public DateTime RetryAt;
             public string Error;
             public bool Failed;          // gave up: Status shows the reason
+            public string Waiting;       // monitor or desktop missing: tries again without giving up
+            public DateTime StartedAt;
             // What the live process was told, to send only real changes.
             public bool TopMost, Locked, HasPosition;
             public int X, Y, Width, Height;
@@ -177,7 +179,11 @@ namespace MultiCam {
         }
 
         static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
+        static readonly TimeSpan WaitDelay = TimeSpan.FromSeconds(5);
         const int MaxFailures = 3;
+        // A viewer that ran this long before failing starts a new count of failures.
+        TimeSpan healthyAfter = TimeSpan.FromSeconds(30);
+        public TimeSpan HealthyAfter { get { return healthyAfter; } set { healthyAfter = value; } }
 
         void Queue(Action change) { lock (gate) pending.Add(change); }
 
@@ -192,8 +198,17 @@ namespace MultiCam {
         bool HandleExit(Slot slot) {
             var p = slot.Process; slot.Process = null;
             int code = p.ExitCode; string reason = Describe(p);
+            bool healthy = p.Ready && DateTime.UtcNow - slot.StartedAt >= healthyAfter;
             p.Dispose();
-            if (code == 4 || code == 5) { slot.Failed = true; slot.Error = reason; return true; }
+            // 4: monitor missing (off, asleep, unplugged); 6: desktop not ready or Explorer restarted.
+            if (code == 4 || code == 6) {
+                slot.Waiting = code == 4 ? "Monitor ausente. Tentando de novo…" : "Área de trabalho indisponível. Tentando de novo…";
+                slot.RetryAt = DateTime.UtcNow + WaitDelay;
+                return false;
+            }
+            slot.Waiting = null;
+            if (code == 5) { slot.Failed = true; slot.Error = reason; return true; }
+            if (healthy) slot.Failures = 0;
             slot.Failures++;
             slot.Error = reason;
             Storage.Log("Visualizador: " + reason);
@@ -205,7 +220,7 @@ namespace MultiCam {
         void StartPip(Slot slot, Camera c) {
             var p = ViewerProcess.StartPip(viewerPath, c, parentPid);
             started++;
-            slot.Process = p;
+            slot.Process = p; slot.StartedAt = DateTime.UtcNow;
             slot.TopMost = c.Pip.TopMost; slot.Locked = c.Pip.Locked; slot.HasPosition = c.Pip.HasPosition;
             slot.X = c.Pip.X; slot.Y = c.Pip.Y; slot.Width = c.Pip.Width; slot.Height = c.Pip.Height;
             p.GeometryChanged += (x, y, w, h) => Queue(() => {
@@ -285,7 +300,7 @@ namespace MultiCam {
             if (wallpaper == null) wallpaper = new Slot { Key = key };
             if (wallpaper.Process != null && wallpaper.Process.Exited) HandleExit(wallpaper);
             if (wallpaper.Failed || wallpaper.Process != null || DateTime.UtcNow < wallpaper.RetryAt) return;
-            try { wallpaper.Process = ViewerProcess.StartWallpaper(viewerPath, w, parentPid); started++; }
+            try { wallpaper.Process = ViewerProcess.StartWallpaper(viewerPath, w, parentPid); wallpaper.StartedAt = DateTime.UtcNow; started++; }
             catch (Exception ex) { wallpaper.Failed = true; wallpaper.Error = ex.Message; }
         }
 
@@ -298,8 +313,10 @@ namespace MultiCam {
         static string StatusOf(Slot slot) {
             if (slot == null) return "";
             if (slot.Failed) return "Falhou: " + slot.Error;
+            if (slot.Process != null && slot.Process.Ready) return "";
+            if (slot.Waiting != null) return slot.Waiting;
             if (slot.Process == null) return slot.Failures > 0 ? "Reiniciando…" : "";
-            return slot.Process.Ready ? "" : "Iniciando…";
+            return "Iniciando…";
         }
 
         public string Status(Camera camera) {

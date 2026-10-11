@@ -116,8 +116,11 @@ inline Hit pipHit(Size window, Point point, bool locked, int border = 6) {
 }
 
 // One line of the panel-to-viewer protocol. Anything unexpected is Invalid, never an error.
+// A UTF-8 BOM at the start is skipped: .NET writes one before the first line when the
+// console encoding is UTF-8 (for example with the "UTF-8 worldwide" option of Windows).
 inline Command parseCommand(const std::string& line) {
-    const auto parts = detail::tokens(line);
+    const bool bom = line.size() >= 3 && line.compare(0, 3, "\xEF\xBB\xBF") == 0;
+    const auto parts = detail::tokens(bom ? line.substr(3) : line);
     Command invalid, command;
     if (parts.empty()) return invalid;
     const std::string& name = parts[0];

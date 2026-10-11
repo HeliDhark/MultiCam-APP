@@ -186,8 +186,8 @@ void Renderer::draw(viewer::Fit fit) {
     context_->PSSetShaderResources(0, 1, &none);
 }
 
-void Renderer::present() {
-    if (swap_) swap_->Present(0, 0);
+bool Renderer::present() {
+    return !swap_ || SUCCEEDED(swap_->Present(0, 0));
 }
 
 bool Renderer::readback(std::vector<uint8_t>& bgra, int& width, int& height) {

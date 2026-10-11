@@ -16,7 +16,10 @@ public:
     // yuy2: width*height*2 bytes, width even. Returns false on invalid input.
     bool upload(const uint8_t* yuy2, int width, int height);
     void draw(viewer::Fit fit);
-    void present();
+    // False when Present failed.
+    bool present();
+    // The GPU was reset or removed (driver update, TDR): this renderer cannot draw any more.
+    bool lost() const { return device_ && FAILED(device_->GetDeviceRemovedReason()); }
     // Forget the current picture: the next draw() shows black until upload() runs again.
     void clear() { hasFrame_ = false; }
     // Top-down BGRA copy of the target. Call before present().

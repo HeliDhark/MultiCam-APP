@@ -68,6 +68,14 @@ static void cmd_invalid() {
     const char* lines[] = {"", "lock", "lock 2", "lock 1 extra", "LOCK 1", "resize 0 360", "resize 99999 10", "resize a b", "%%%", "move 1"};
     for (const char* line : lines) CHECK(parseCommand(line).kind == CommandKind::Invalid);
 }
+// .NET puts a UTF-8 BOM before the first line when the console encoding is UTF-8.
+static void cmd_bom() {
+    const std::string bom = "\xEF\xBB\xBF";
+    CHECK(is(parseCommand(bom + "lock 1"), CommandKind::Lock, 1));
+    CHECK(is(parseCommand(bom + "quit\r"), CommandKind::Quit));
+    CHECK(parseCommand(bom).kind == CommandKind::Invalid);
+    CHECK(parseCommand("lo" + bom + "ck 1").kind == CommandKind::Invalid);
+}
 
 static void events() {
     CHECK(geometryEvent({10, 20, 640, 360}) == "{\"Event\":\"geometry\",\"X\":10,\"Y\":20,\"Width\":640,\"Height\":360}");
@@ -79,7 +87,7 @@ int main() {
     fit_contain(); fit_fill(); fit_same_aspect();
     aspect_width_leads(); aspect_limits();
     clamp_offscreen(); clamp_two_monitors(); clamp_no_monitors();
-    hit_zones(); cmd_valid(); cmd_invalid(); events();
+    hit_zones(); cmd_valid(); cmd_invalid(); cmd_bom(); events();
     if (failures == 0) std::printf("PASS\n");
     return failures;
 }

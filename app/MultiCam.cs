@@ -168,6 +168,9 @@ namespace MultiCam {
         Dictionary<string,int> failures=new Dictionary<string,int>();
         Dictionary<string,DateTime> missing=new Dictionary<string,DateTime>();
         HashSet<string> connected=new HashSet<string>();
+        // Cameras whose virtual camera is registered. It outlives a restart of the capture worker,
+        // so PiP and wallpaper stay open (last frame, then black) while the worker comes back.
+        HashSet<string> registered=new HashSet<string>();
         NotifyIcon tray;
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=2000 };
         ListView list=new ListView { Dock=DockStyle.Fill,View=View.Details,FullRowSelect=true,HideSelection=false,MultiSelect=false };
@@ -360,7 +363,7 @@ namespace MultiCam {
         }
         void ReconcileViewers() {
             try {
-                if(viewers.Reconcile(config,c=> { Session s; return sessions.TryGetValue(c.Id,out s)&&s.Published; })) {
+                if(viewers.Reconcile(config,c=>registered.Contains(c.Id))) {
                     Storage.Save(config);
                     if(!pipSize.DroppedDown)ShowPip();
                 }
@@ -383,6 +386,7 @@ namespace MultiCam {
         }
         void Stop(Camera c) {
             Registration.Remove(c,false);
+            registered.Remove(c.Id);
             EndSession(c);
         }
         // Ends only the capture worker. The virtual camera stays registered so open
@@ -420,7 +424,7 @@ namespace MultiCam {
                             if(count>=3) Stop(c); else EndSession(c);
                             retry[c.Id]=DateTime.UtcNow.AddSeconds(count>=3?10:2);
                         }
-                        else if(session.Ready&&!session.Published) { Registration.Publish(c); session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
+                        else if(session.Ready&&!session.Published) { Registration.Publish(c); registered.Add(c.Id); session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
                         continue;
                     }
                     DateTime next; if(retry.TryGetValue(c.Id,out next)&&next>DateTime.UtcNow)continue;

@@ -59,6 +59,7 @@ Esses resultados correspondem aos modos acima e ao conteúdo recebido durante o 
 Toolchain portátil (`.buildtools`, MSVC 14.51) no Windows 10 build 19044 deste computador.
 
 - `tests/viewer.ps1`, 12 casos, todos PASS. PiP: cor da conversão YUY2→RGB conferida em snapshot (vermelho puro BT.601), teste de clique com e sem *Travar*, troca de resolução da origem com ajuste da altura, saída quando o painel morre, linhas inválidas na entrada padrão, argumentos inválidos. Papel de parede: janela filha da `WorkerW`, média de 30 FPS desenhados com a opção 30 e de 60 com a opção 60 (fonte a 60), snapshot do monitor inteiro em *Ajustar*, monitor inexistente (código 4), saída quando o painel morre.
+- Revisão independente (11/10/2026): `tests/viewer.ps1` passou a ter 14 casos, todos PASS: janela do papel de parede destruída (Explorer reiniciado) sai com código 6, e janela tirada do lugar volta a cobrir o monitor. `tests/panel.ps1` passou a 11 casos, todos PASS: códigos 4 e 6 esperam e tentam de novo sem desistir, e o contador de falhas zera após um período saudável. `MultiCam.ViewerCoreTest`: comando com BOM UTF-8 no início é aceito.
 - `tests/panel.ps1`, 8 casos PASS: configurações antigas carregam, valores inválidos são corrigidos, presets 16:9 e 4:3, ciclo de vida de um PiP real, limite de 3 reinícios.
 - `tests/integration.ps1` continua PASS depois das mudanças (307/154 amostras, zero rasgados, zero pretos).
 - Verificação visual no PC: com o papel de parede ativo, ícones e barra de tarefas aparecem por cima; ao sair, o papel de parede original volta.

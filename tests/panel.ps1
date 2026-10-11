@@ -99,6 +99,55 @@ Run 'manager_restart_limit' {
     } finally { $manager.Dispose(); Remove-Item $fake -ErrorAction SilentlyContinue }
 }
 
+function New-FakeViewer([string[]]$lines) {
+    $fake = Join-Path $env:TEMP "mc-fake-viewer-$([guid]::NewGuid()).cmd"
+    Set-Content -Path $fake -Value $lines -Encoding ascii
+    return $fake
+}
+function New-WallpaperConfig {
+    $config = New-Object MultiCam.Config
+    $c = New-Object MultiCam.Camera; $c.Id = [guid]::NewGuid().ToString(); $c.Alias = 'A'; $c.Mode = New-Mode 1920 1080
+    $config.Cameras.Add($c)
+    [MultiCam.ViewerSettings]::Normalize($config)
+    $config.Wallpaper.Enabled = $true; $config.Wallpaper.CameraId = $c.Id; $config.Wallpaper.Monitor = '\\.\DISPLAY1'
+    return $config
+}
+function Run-Manager($manager, $config, [int]$seconds) {
+    $ready = [Func[MultiCam.Camera, bool]] { param($x) $true }
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    while ([DateTime]::UtcNow -lt $deadline) { [void]$manager.Reconcile($config, $ready); Start-Sleep -Milliseconds 200 }
+}
+
+# Monitor ausente (4) ou área de trabalho indisponível (6): o painel espera e tenta de novo, sem desistir.
+foreach ($case in @(@{ Code = 4; Text = 'Monitor' }, @{ Code = 6; Text = 'rea de trabalho' })) {
+    $name = "manager_waits_on_exit_$($case.Code)"
+    Run $name {
+        $fake = New-FakeViewer "@exit /b $($case.Code)"
+        $manager = New-Object MultiCam.ViewerManager $fake, $PID
+        try {
+            $config = New-WallpaperConfig
+            Run-Manager $manager $config 12
+            $status = $manager.WallpaperStatus()
+            if (-not $status.StartsWith('Falhou') -and $status.Contains($case.Text) -and $manager.Started -ge 2) { Pass $name }
+            else { Fail $name "Status='$status' Started=$($manager.Started)" }
+        } finally { $manager.Dispose(); Remove-Item $fake -ErrorAction SilentlyContinue }
+    }
+}
+
+# Falhas espalhadas: depois de um tempo funcionando, o contador volta a zero.
+Run 'manager_failures_reset' {
+    $fake = New-FakeViewer '@echo {"Event":"ready","Hwnd":1}', '@ping -n 2 127.0.0.1 >nul', '@exit /b 1'
+    $manager = New-Object MultiCam.ViewerManager $fake, $PID
+    $manager.HealthyAfter = [TimeSpan]::FromMilliseconds(500)
+    try {
+        $config = New-WallpaperConfig
+        Run-Manager $manager $config 16
+        $status = $manager.WallpaperStatus()
+        if (-not $status.StartsWith('Falhou') -and $manager.Started -ge 4) { Pass 'manager_failures_reset' }
+        else { Fail 'manager_failures_reset' "Status='$status' Started=$($manager.Started)" }
+    } finally { $manager.Dispose(); Remove-Item $fake -ErrorAction SilentlyContinue }
+}
+
 if ($failures) { Write-Host "FAIL ($failures)"; exit 1 }
 Write-Host 'PASS'
 exit 0

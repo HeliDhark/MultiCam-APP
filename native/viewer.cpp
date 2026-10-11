@@ -1,8 +1,10 @@
 // MultiCam.Viewer: reads a camera channel and shows it in a borderless PiP window (--pip)
 // or as a live desktop wallpaper behind the icons (--wallpaper).
 // Protocol: commands on stdin (see viewer::parseCommand), JSON events on stdout, one per line.
-// Exit codes: 0 normal, 1 snapshot timeout, 2 invalid arguments, 3 Direct3D failure,
-// 4 monitor not found, 5 could not attach behind the desktop icons (WorkerW).
+// Exit codes: 0 normal, 1 snapshot timeout, 2 invalid arguments, 3 Direct3D failure (also a lost
+// device: driver update, TDR), 4 monitor not found, 5 could not attach behind the desktop icons
+// (WorkerW), 6 the desktop is not available or went away (Explorer not running or restarted).
+// The panel waits and tries again after 4 and 6, and gives up on 5.
 #include <windows.h>
 #include <windowsx.h>
 #include <objbase.h>
@@ -201,6 +203,20 @@ HWND findWorkerW() {
     return worker;
 }
 
+// Puts the wallpaper window over the monitor again after a change of resolution, scale or
+// monitor layout (a child window gets no WM_DISPLAYCHANGE). False when the monitor is gone.
+bool keepOnMonitor(HWND hwnd, const std::wstring& device, RECT& monitor) {
+    if (!findMonitor(device, monitor)) return false;
+    RECT now{};
+    GetWindowRect(hwnd, &now);
+    if (EqualRect(&now, &monitor)) return true;
+    POINT origin{monitor.left, monitor.top};
+    ScreenToClient(GetParent(hwnd), &origin);
+    SetWindowPos(hwnd, nullptr, origin.x, origin.y, monitor.right - monitor.left, monitor.bottom - monitor.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    return true;
+}
+
 // A foreground window (not the shell, not us) that covers the whole monitor.
 bool fullscreenOver(const RECT& monitor) {
     HWND fg = GetForegroundWindow();
@@ -227,8 +243,20 @@ struct Viewer {
     int drawn = 0;
     bool quit = false;
     int exitCode = 0;
+    bool closing = false;          // we are destroying our own window
     bool paused = false, sessionLocked = false;
     double lastDraw = -1e9;
+
+    void stop(int code, const std::wstring& reason) {
+        if (quit) return;
+        fail(reason);
+        exitCode = code;
+        quit = true;
+    }
+    // A lost device never recovers by itself: exit so the panel starts a fresh viewer.
+    void checkDevice() {
+        if (renderer.lost()) stop(3, L"O dispositivo Direct3D foi perdido (driver de vídeo reiniciado?).");
+    }
 
     viewer::Rect windowRect() const {
         RECT r{};
@@ -251,7 +279,7 @@ struct Viewer {
 
     void redraw() {
         renderer.draw(opt.fit);
-        renderer.present();
+        if (!renderer.present()) checkDevice();
     }
 
     void command(const viewer::Command& c) {
@@ -314,6 +342,7 @@ struct Viewer {
                     ++drawn;
                     return true;
                 }
+                checkDevice();
             }
         }
         if (picture && now - lastFrame > StaleMs) {
@@ -388,6 +417,10 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_WTSSESSION_CHANGE:
             if (wp == WTS_SESSION_LOCK) app.sessionLocked = true;
             else if (wp == WTS_SESSION_UNLOCK) app.sessionLocked = false;
+            return 0;
+        case WM_DESTROY:
+            // Explorer restarted or crashed and took the WorkerW (and us) with it.
+            if (!app.closing) app.stop(6, L"A área de trabalho foi recriada (Explorer reiniciado).");
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -505,6 +538,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     wchar_t savedWallpaper[MAX_PATH]{};
     if (app.opt.wallpaper) {
         if (!findMonitor(app.opt.monitor, monitor)) { fail(L"monitor não encontrado: " + app.opt.monitor); return 4; }
+        if (!FindWindowW(L"Progman", nullptr)) { fail(L"A área de trabalho ainda não está pronta (Explorer não está rodando)."); return 6; }
         HWND worker = findWorkerW();
         if (!worker) {
             fail(L"Não foi possível ancorar o papel de parede atrás dos ícones (WorkerW não encontrada). "
@@ -528,7 +562,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (!hwnd) { fail(L"Não foi possível criar a janela."); return 3; }
     }
     std::wstring error;
-    if (!app.renderer.init(hwnd, error)) { fail(error); DestroyWindow(hwnd); return 3; }
+    if (!app.renderer.init(hwnd, error)) { fail(error); app.closing = true; DestroyWindow(hwnd); return 3; }
     app.hwnd = hwnd;
     if (!app.opt.wallpaper) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     app.redraw();
@@ -556,7 +590,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         const ULONGLONG now = GetTickCount64();
         if (app.opt.wallpaper) {
-            if (now - lastFullscreenCheck >= 500) { fullscreen = fullscreenOver(monitor); lastFullscreenCheck = now; }
+            if (now - lastFullscreenCheck >= 500) {
+                lastFullscreenCheck = now;
+                if (!IsWindow(hwnd)) { app.stop(6, L"A área de trabalho foi recriada (Explorer reiniciado)."); break; }
+                if (!keepOnMonitor(hwnd, app.opt.monitor, monitor)) { app.stop(4, L"monitor não encontrado: " + app.opt.monitor); break; }
+                fullscreen = fullscreenOver(monitor);
+            }
             app.paused = app.opt.snapshot.empty() && (fullscreen || app.sessionLocked);
         }
         const bool drew = app.poll(now);
@@ -574,6 +613,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (app.opt.wallpaper) {
         WTSUnRegisterSessionNotification(hwnd);
         HWND worker = GetParent(hwnd);
+        app.closing = true;
         DestroyWindow(hwnd);
         if (worker) RedrawWindow(worker, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         // Ask Windows to paint the user's own wallpaper again, without touching the saved setting.
