@@ -3,6 +3,7 @@
 #include "source/dshow-formats.hpp"
 #include "channel.hpp"
 #include "jpeg.hpp"
+#include "pipeline.hpp"
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <initguid.h>
@@ -131,8 +132,24 @@ static int capture(int argc, wchar_t** argv) {
     if (!stop || !parent) throw std::runtime_error("Falha ao acompanhar o processo principal.");
     ResetEvent(stop);
     std::atomic<uint64_t> count{0}, dropped{0};
-    std::unique_ptr<JpegDecoder> jpeg;
-    if(format==VideoFormat::MJPEG)jpeg=std::make_unique<JpegDecoder>();
+    auto publish=[&](const unsigned char* frame) {
+        memcpy(channel.writeSlot(), frame, size_t(w)*h*2);
+        ++count; channel.publish();
+    };
+    // MJPEG: two threads decode consecutive frames (one cannot keep up with a detailed
+    // 1080p60 source on older CPUs); frames are still published in capture order.
+    std::vector<std::unique_ptr<JpegDecoder>> decoders;
+    std::unique_ptr<multi::DecodePipeline> pipeline;
+    if(format==VideoFormat::MJPEG) {
+        for(int i=0;i<2;++i)decoders.push_back(std::make_unique<JpegDecoder>());
+        pipeline=std::make_unique<multi::DecodePipeline>(int(decoders.size()),
+            [&](int thread,const uint8_t* data,size_t bytes) -> const uint8_t* {
+                auto frame=decoders[size_t(thread)]->decode(data,bytes,w,h);
+                if(!frame)++dropped;
+                return frame;
+            },publish);
+    }
+    const bool jpeg=pipeline!=nullptr;
     Device device(InitGraph::True);
     VideoConfig config; config.path = path; config.name = argv[9]; config.useDefaultConfig = false;
     config.cx = w; config.cy_abs = h; config.frameInterval = interval;
@@ -141,14 +158,15 @@ static int capture(int argc, wchar_t** argv) {
         if(actual.cx!=w||actual.cy_abs!=h){++dropped;return;}
         if(jpeg) {
             if(actual.format!=VideoFormat::MJPEG){++dropped;return;}
-            data=jpeg->decode(data,bytes,w,h);bytes=size_t(w)*h*2;
-            if(!data){++dropped;return;}
-        }else if(actual.format!=VideoFormat::YUY2){++dropped;return;}
+            pipeline->submit(data,bytes);
+            return;
+        }
+        if(actual.format!=VideoFormat::YUY2){++dropped;return;}
         if(bytes<size_t(w)*h*2||bytes%h){++dropped;return;}
-        auto target = channel.writeSlot();
         size_t stride = bytes/h;
-        if (stride == size_t(w)*2) memcpy(target, data, size_t(w)*h*2);
-        else for (int y=0; y<h; ++y) memcpy(target+size_t(y)*w*2, data+size_t(y)*stride, size_t(w)*2);
+        if (stride == size_t(w)*2) { publish(data); return; }
+        auto target = channel.writeSlot();
+        for (int y=0; y<h; ++y) memcpy(target+size_t(y)*w*2, data+size_t(y)*stride, size_t(w)*2);
         ++count; channel.publish();
     };
     if (!device.Valid() || !device.SetVideoConfig(&config) || !device.ConnectFilters())
@@ -160,12 +178,14 @@ static int capture(int argc, wchar_t** argv) {
     HANDLE waits[]{stop,parent}; uint64_t previous=0, lastFrame=GetTickCount64();
     while (WaitForMultipleObjects(2,waits,FALSE,1000)==WAIT_TIMEOUT) {
         auto current=count.load();
-        std::cout << "{\"Frames\":" << current << ",\"Fps\":" << current-previous << ",\"Dropped\":" << dropped.load() << "}" << std::endl;
+        const uint64_t lost = dropped.load() + (pipeline ? pipeline->dropped() : 0);
+        std::cout << "{\"Frames\":" << current << ",\"Fps\":" << current-previous << ",\"Dropped\":" << lost << "}" << std::endl;
         if (current != previous) lastFrame=GetTickCount64();
         if (GetTickCount64()-lastFrame>7000) { std::cerr << "Sem novos quadros por 7 segundos. Verifique conexao, modo e programas usando a placa.\n"; break; }
         previous=current;
     }
     device.Stop();
+    if (pipeline) pipeline->finish();
     channel.stop();
     CloseHandle(parent); CloseHandle(stop); return count ? 0 : 3;
 }
