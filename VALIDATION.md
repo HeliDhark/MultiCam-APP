@@ -84,3 +84,8 @@ O alvo CMake `MultiCam.JpegTest` é opcional: compile-o com `--config Release --
 Artefatos locais de teste estão em `artifacts/`, fora do controle de versão. Logs de antigas tentativas com conversores Windows permanecem no diagnóstico; a versão final usa libjpeg-turbo para MJPEG.
 - Ritmo da câmera virtual (11/10/2026), `tests/pacing.ps1`: fonte parecida com uma placa real (relógio 0,1% mais lento e cada quadro chegando de 0 a 4 ms atrasado). Antes da correção, um app a 60 FPS recebeu 30 quadros repetidos e 29 pulados em 10 s; depois, 0 e 0 nos clientes x64 60 FPS, x64 30 FPS e x86 60 FPS. Com a fonte parada, o app continua recebendo cerca de 60 FPS (último quadro e depois preto). CPU com dois apps em 1080p60: 5% de um núcleo por app, contra 9,6% antes (cópia direta da memória compartilhada para o buffer do app).
 - Decodificação MJPEG em 2 threads (11/10/2026), `MultiCam.PipelineTest`: ordem de captura preservada, captura nunca bloqueada e falha de decodificação sem travar a fila. Com quadros de 12 ms chegando a cada 8 ms, 1 thread publica 38 de 60 e 2 threads publicam 60 de 60. JPEG 1080p real com muito detalhe a 60 FPS: 33 FPS com 1 thread e 57 FPS com 2. Na FreeSky real (MJPEG 1080p60, imagem simples): 60 FPS e 61% de um núcleo.
+- Captura sob demanda (12/10/2026):
+  - `MultiCam.DemandTest`: 9 casos, PASS.
+  - `tests/panel.ps1`: 18 casos, todos PASS, incluindo agendador com relógio falso, leitura cruzada de clientes x64 e x86, cliente morto e evento de despertar.
+  - `tests/pacing.ps1`: 5 casos, PASS (o app recebendo vídeo sinaliza uso e libera ao parar).
+  - `tests/viewer.ps1`: 15 casos, PASS (o viewer aberto sinaliza uso).
