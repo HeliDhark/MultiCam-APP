@@ -28,6 +28,8 @@ target_link_libraries(MultiCam.Integration PRIVATE libdshowcapture ole32 oleaut3
 add_executable(MultiCam.JpegTest EXCLUDE_FROM_ALL tests/jpeg.cpp)
 add_executable(MultiCam.ViewerCoreTest EXCLUDE_FROM_ALL tests/viewer_core.cpp)
 add_executable(MultiCam.PipelineTest EXCLUDE_FROM_ALL tests/pipeline_test.cpp)
+add_executable(MultiCam.DemandTest EXCLUDE_FROM_ALL tests/demand_test.cpp)
+target_link_libraries(MultiCam.DemandTest PRIVATE ole32)
 # HLSL is compiled at build time with fxc; no runtime d3dcompiler dependency.
 find_program(FXC_EXE fxc HINTS "$ENV{WindowsSdkVerBinPath}/x64" "$ENV{WindowsSdkBinPath}/x64")
 if(NOT FXC_EXE)
