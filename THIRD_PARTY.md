@@ -4,6 +4,7 @@
 Origem: https://github.com/obsproject/libdshowcapture
 Commit base: `c13d4b7b0c66979396ba0a9060c9aafc15bb7b22`.
 Licença completa: `third_party/libdshowcapture/COPYING`.
+A cópia versionada neste repositório já inclui as modificações abaixo (desde 2026-10-12; antes era um ponteiro para o repositório original sem as modificações).
 
 Modificações locais em 2026-09-21:
 
