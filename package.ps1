@@ -21,8 +21,24 @@ function Data-Hash {
 }
 
 if (-not (Test-Path (Join-Path $dist 'MultiCam.exe'))) { throw 'dist\MultiCam.exe não existe. Rode build.ps1 antes.' }
-$locked = & tasklist /m MultiCam.Camera.dll /fo csv /nh 2>$null | Where-Object { $_ -like '"*' }
-if ($locked) { Write-Warning "MultiCam.Camera.dll em uso (ex.: Discord); essa DLL pode não ser trocada:`n$($locked -join "`n")" }
+$running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($final + '\', [StringComparison]::OrdinalIgnoreCase) })
+if ($running) { throw "Feche o MultiCam pela bandeja (Sair) antes de atualizar: $(($running | ForEach-Object { $_.ProcessName + ' ' + $_.Id }) -join ', ')" }
+
+# Apps que só listam câmeras (Discord, navegadores) carregam MultiCam.Camera.dll e a prendem.
+# O Windows deixa mover um arquivo em uso: a DLL antiga vai para .substituidos e a nova entra
+# no lugar; quem já a carregou segue com a antiga até reabrir. Sobras antigas são apagadas aqui.
+$replaced = Join-Path $final '.substituidos'
+if (Test-Path $replaced) {
+    Get-ChildItem $replaced -File | ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
+}
+function Move-LockedAside([string]$file) {
+    if (-not (Test-Path $file)) { return }
+    try { [IO.File]::Open($file, 'Open', 'ReadWrite', 'None').Dispose(); return } catch { }
+    New-Item -ItemType Directory -Force $replaced | Out-Null
+    $aside = Join-Path $replaced ("{0}.{1:yyyyMMdd-HHmmss}" -f (Split-Path $file -Leaf), (Get-Date))
+    Move-Item -LiteralPath $file -Destination $aside
+    Write-Host "Em uso, movido para .substituidos: $file"
+}
 
 Write-Host '=== build\package (espelho de dist, sem data)'
 Robocopy-Checked @($dist, $package, '/MIR', '/XD', 'data')
@@ -33,7 +49,12 @@ if ($LASTEXITCODE) { throw 'portable-check falhou; MultiCam-Final não foi alter
 
 Write-Host '=== MultiCam-Final (mantendo data)'
 $before = Data-Hash
-Robocopy-Checked @($package, $final, '/E', '/XD', 'data')
+foreach ($arch in 'x64', 'x86') {
+    $dll = Join-Path $final "$arch\MultiCam.Camera.dll"
+    $new = Join-Path $package "$arch\MultiCam.Camera.dll"
+    if ((Test-Path $dll) -and (Test-Path $new) -and (Get-FileHash $dll).Hash -ne (Get-FileHash $new).Hash) { Move-LockedAside $dll }
+}
+Robocopy-Checked @($package, $final, '/E', '/XD', 'data', '.substituidos')
 if ((Data-Hash) -ne $before) { throw 'MultiCam-Final\data\settings.json mudou! Confira o .bak.' }
 
 Write-Host '=== zip'
