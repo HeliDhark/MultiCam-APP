@@ -173,6 +173,8 @@ namespace MultiCam {
         HashSet<string> registered=new HashSet<string>();
         // Capture on demand: a card runs while its camera is in use and for a minute after.
         CaptureScheduler scheduler=new CaptureScheduler();
+        // Demand areas of registered cameras, created by the panel so sandboxed apps can write them.
+        Dictionary<string,IDisposable> demandAreas=new Dictionary<string,IDisposable>();
         DemandWaker waker;
         bool wakePending;
         NotifyIcon tray;
@@ -394,6 +396,7 @@ namespace MultiCam {
             Registration.Remove(c,false);
             registered.Remove(c.Id);
             scheduler.Forget(c.Id);
+            IDisposable area; if(demandAreas.TryGetValue(c.Id,out area)) { area.Dispose(); demandAreas.Remove(c.Id); }
             EndSession(c);
         }
         // Ends only the capture worker. The virtual camera stays registered so open
@@ -429,10 +432,11 @@ namespace MultiCam {
                         if(session.Exited) {
                             errors[c.Id]=String.IsNullOrEmpty(session.Error)?"Captura encerrada. Confira o modo e feche o acesso direto à placa.":session.Error;
                             int count; failures.TryGetValue(c.Id,out count); failures[c.Id]=++count;
-                            if(count>=3) Stop(c); else EndSession(c);
+                            if(CaptureScheduler.Unregister(count,registered.Contains(c.Id))) Stop(c); else EndSession(c);
                             retry[c.Id]=DateTime.UtcNow.AddSeconds(count>=3?10:2);
                         }
-                        else if(session.Ready&&!session.Published) { Registration.Publish(c); registered.Add(c.Id); scheduler.Touch(c.Id,DateTime.UtcNow); session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
+                        else if(session.Ready&&!session.Published) { Registration.Publish(c); registered.Add(c.Id); scheduler.Touch(c.Id,DateTime.UtcNow);
+                            if(!demandAreas.ContainsKey(c.Id)) try { demandAreas[c.Id]=Demand.Prepare(c.Id); } catch(Exception ex) { Storage.Log("Área de demanda: "+ex.Message); } session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
                         // No app, PiP or wallpaper for a minute: stop the card, keep the camera registered.
                         else if(action==CaptureAction.Stop) EndSession(c);
                         continue;
@@ -454,11 +458,20 @@ namespace MultiCam {
             } catch(Exception ex) {status.Text=ex.Message;Storage.Log(ex.ToString());}
             finally {busy=false;if(wakePending) {wakePending=false;timer.Interval=50;}if(closePending)ExitApp();}
         }
+        // Status column of the list. An error wins over "Em espera": a registered camera whose
+        // capture fails must not look idle while apps show black.
+        public static string StateText(bool connected,bool enabled,bool running,bool published,bool registered,bool error) {
+            if(!connected)return "Desconectada";
+            if(!enabled)return "Desativada";
+            if(running)return published?"Compartilhando":"Iniciando…";
+            if(error)return "Precisa de atenção";
+            return registered?"Em espera":"Detectada";
+        }
         void RenderList() {
             var selected=Selected;list.BeginUpdate();
             foreach(var c in config.Cameras) {
                 Session s;sessions.TryGetValue(c.Id,out s);
-                string state=!connected.Contains(c.Identity)?"Desconectada":!c.Enabled?"Desativada":s!=null?(s.Published?"Compartilhando":"Iniciando…"):registered.Contains(c.Id)?"Em espera":errors.ContainsKey(c.Id)?"Precisa de atenção":"Detectada";
+                string state=StateText(connected.Contains(c.Identity),c.Enabled,s!=null,s!=null&&s.Published,registered.Contains(c.Id),errors.ContainsKey(c.Id));
                 string view=Display(c,config); string viewState=viewers.Status(c); if(viewState.StartsWith("Falhou"))view="PiP falhou";
                 var values=new[]{c.Alias+" (Multi)",c.LastName,state,c.Mode==null?"Selecione um modo":c.Mode.ToString(),s==null?"—":Interlocked.Read(ref s.Fps).ToString(),view};
                 var item=list.Items.Cast<ListViewItem>().FirstOrDefault(v=>((Camera)v.Tag).Id==c.Id);

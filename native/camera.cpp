@@ -40,7 +40,8 @@ class Camera final : public DShow::OutputFilter {
         bool repeating=false;
         // While this thread delivers video the camera is in use: the panel keeps the card capturing.
         multi::DemandClient demand;
-        demand.begin(id_);
+        if (!demand.begin(id_))
+            OutputDebugStringW((L"MultiCam: não foi possível sinalizar uso da câmera " + id_ + L"; a placa só captura se outro cliente pedir.\n").c_str());
         while (WaitForSingleObject(stop_,0)!=WAIT_OBJECT_0) {
             demand.beat();
             const auto interval=GetInterval();

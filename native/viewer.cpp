@@ -574,7 +574,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (HANDLE t = CreateThread(nullptr, 0, readInput, nullptr, 0, nullptr)) CloseHandle(t);
     // An open viewer is a use of the camera: the panel keeps the card capturing.
     multi::DemandClient demand;
-    demand.begin(app.opt.camera);
+    // Not on stderr: the panel shows the last stderr line as the reason of an exit.
+    if (!demand.begin(app.opt.camera)) OutputDebugStringW(L"MultiCam.Viewer: não foi possível sinalizar uso da câmera.\n");
 
     const ULONGLONG start = GetTickCount64();
     ULONGLONG lastStats = start, lastFullscreenCheck = 0;

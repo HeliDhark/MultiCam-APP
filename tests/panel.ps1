@@ -174,6 +174,32 @@ Run 'scheduler_forget' {
     if (Assert-Action 'scheduler_forget' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(131)) 'Stop') { Pass 'scheduler_forget' }
 }
 
+# 3 falhas seguidas só retiram a câmera dos aplicativos antes da primeira validação. Depois,
+# outro programa pode ter pegado a placa ociosa: a "(Multi)" continua na lista e tenta de novo.
+Run 'unregister_after_failures' {
+    $r = @([MultiCam.CaptureScheduler]::Unregister(3, $false), [MultiCam.CaptureScheduler]::Unregister(3, $true), [MultiCam.CaptureScheduler]::Unregister(2, $false))
+    if ($r[0] -and -not $r[1] -and -not $r[2]) { Pass 'unregister_after_failures' } else { Fail 'unregister_after_failures' "($($r -join ','))" }
+}
+
+# Legenda da lista: um erro aparece mesmo com a câmera registrada (antes "Em espera" o escondia).
+Run 'state_text' {
+    $cases = @(
+        @(@($false, $true, $false, $false, $true, $false), 'Desconectada'),
+        @(@($true, $false, $false, $false, $true, $false), 'Desativada'),
+        @(@($true, $true, $true, $false, $false, $false), 'Iniciando…'),
+        @(@($true, $true, $true, $true, $true, $false), 'Compartilhando'),
+        @(@($true, $true, $false, $false, $true, $true), 'Precisa de atenção'),
+        @(@($true, $true, $false, $false, $true, $false), 'Em espera'),
+        @(@($true, $true, $false, $false, $false, $false), 'Detectada'))
+    $bad = @()
+    foreach ($c in $cases) {
+        $a = $c[0]
+        $got = [MultiCam.MainForm]::StateText($a[0], $a[1], $a[2], $a[3], $a[4], $a[5])
+        if ($got -ne $c[1]) { $bad += "$($a -join ',') -> '$got' (esperado '$($c[1])')" }
+    }
+    if (-not $bad) { Pass 'state_text' } else { Fail 'state_text' ($bad -join '; ') }
+}
+
 # Uma vaga mantida por um cliente nativo (x64 ou x86) é vista pelo painel.
 $integrationX86 = Join-Path $root 'build/Win32/Release/MultiCam.Integration.exe'
 function Start-Demand($exe, $id, $seconds) {
@@ -209,6 +235,33 @@ Run 'demand_cross_killed' {
         $later = [MultiCam.Demand]::Active($id)
         if ($during -and $justKilled -and -not $later) { Pass 'demand_cross_killed' } else { Fail 'demand_cross_killed' "durante=$during logo_depois=$justKilled 3,5s=$later" }
     } finally { if ($holder) { $holder.Dispose() }; if (-not $p.HasExited) { $p.Kill() } }
+}
+# App em integridade baixa (sandbox): ele sinaliza e acorda o painel porque o painel cria a área
+# e o evento com descritor que permite escrita a processos baixos e elevados do mesmo usuário.
+# Sem isso, uma área criada antes por um processo médio (outro app) recusa o cliente baixo.
+Run 'demand_low_integrity_client' {
+    $dir = Join-Path $env:TEMP "mc-low-$([guid]::NewGuid())"; New-Item -ItemType Directory $dir | Out-Null
+    $low = Join-Path $dir 'MultiCam.Integration.exe'; Copy-Item $integrationExe $low
+    & icacls $low /setintegritylevel low | Out-Null
+    $id = [guid]::NewGuid().ToString()
+    if (-not ('WakeFlag' -as [type])) { Add-Type -TypeDefinition 'public static class WakeFlag { public static volatile bool Woke; public static System.Action Setter() { return delegate { Woke = true; }; } }' }
+    [WakeFlag]::Woke = $false
+    $prepared = [MultiCam.Demand]::Prepare($id)
+    $waker = New-Object MultiCam.DemandWaker ([WakeFlag]::Setter())
+    $p = $null
+    try {
+        Start-Sleep -Milliseconds 200
+        $p = Start-Demand $low $id 3
+        Start-Sleep -Milliseconds 800
+        $during = [MultiCam.Demand]::Active($id); $woke = [WakeFlag]::Woke
+        [void]$p.WaitForExit(8000)
+        if ($during -and $woke -and $p.ExitCode -eq 0) { Pass 'demand_low_integrity_client' }
+        else { Fail 'demand_low_integrity_client' "uso=$during acordou=$woke saída=$($p.ExitCode)" }
+    } finally {
+        $waker.Dispose(); $prepared.Dispose()
+        if ($p -and -not $p.HasExited) { $p.Kill() }
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 Run 'demand_waker' {
     # O callback roda numa thread do .NET: um delegate C#, não um scriptblock (sem runspace lá).

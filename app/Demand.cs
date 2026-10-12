@@ -5,7 +5,9 @@ using System;
 using System.Collections.Generic;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 namespace MultiCam {
     public static class Demand {
@@ -22,6 +24,55 @@ namespace MultiCam {
         }
 
         public static bool Active(string cameraId) { return Active(cameraId, Now()); }
+
+        // Kernel objects shared with the clients get an explicit descriptor: full access for this
+        // user, SYSTEM and Administrators (an elevated app), and a Low mandatory label, so an app
+        // in a low-integrity sandbox can still write its slot and wake the panel. With the default
+        // descriptor of whoever creates the object first, such an app would fail silently and
+        // never start the card.
+        [StructLayout(LayoutKind.Sequential)]
+        struct SecurityAttributes { public int Length; public IntPtr Descriptor; public int Inherit; }
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, int revision, out IntPtr descriptor, IntPtr size);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeFileHandle CreateFileMappingW(IntPtr file, ref SecurityAttributes attributes, int protect, int sizeHigh, int sizeLow, string name);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeWaitHandle CreateEventW(ref SecurityAttributes attributes, bool manualReset, bool initialState, string name);
+
+        delegate T WithAttributes<T>(ref SecurityAttributes attributes);
+        static T Shared<T>(WithAttributes<T> create) {
+            string user = WindowsIdentity.GetCurrent().User.Value;
+            IntPtr descriptor;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW("D:(A;;GA;;;" + user + ")(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;LW)", 1, out descriptor, IntPtr.Zero))
+                throw new System.ComponentModel.Win32Exception();
+            try {
+                var attributes = new SecurityAttributes { Length = Marshal.SizeOf(typeof(SecurityAttributes)), Descriptor = descriptor };
+                return create(ref attributes);
+            } finally { LocalFree(descriptor); }
+        }
+
+        // Creates (or opens) the demand area of a registered camera and keeps it alive while the
+        // returned handle is open. Dispose it when the camera is unregistered.
+        public static IDisposable Prepare(string cameraId) {
+            var handle = Shared<SafeFileHandle>(delegate(ref SecurityAttributes a) {
+                return CreateFileMappingW(new IntPtr(-1), ref a, 0x04 /* PAGE_READWRITE */, 0, Size, Name(cameraId));
+            });
+            if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception();
+            return handle;
+        }
+
+        // The wake event, created with the shared descriptor (auto-reset).
+        internal static EventWaitHandle WakeEvent() {
+            var handle = Shared<SafeWaitHandle>(delegate(ref SecurityAttributes a) {
+                return CreateEventW(ref a, false, false, "Local\\MultiCam-wake");
+            });
+            if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception();
+            var signal = new EventWaitHandle(false, EventResetMode.AutoReset);
+            signal.SafeWaitHandle.Dispose();
+            signal.SafeWaitHandle = handle;
+            return signal;
+        }
 
         // True when some client holds a slot refreshed less than 3 s ago. No area, no demand.
         public static bool Active(string cameraId, ulong nowTick) {
@@ -41,7 +92,7 @@ namespace MultiCam {
 
     // Calls `wake` (on a background thread) whenever a client takes a demand slot.
     public sealed class DemandWaker : IDisposable {
-        readonly EventWaitHandle signal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\MultiCam-wake");
+        readonly EventWaitHandle signal = Demand.WakeEvent();
         readonly Thread thread;
         volatile bool stopping;
 
@@ -83,5 +134,10 @@ namespace MultiCam {
         public void Touch(string id, DateTime now) { lastUse[id] = now; }
 
         public void Forget(string id) { lastUse.Remove(id); }
+
+        // After 3 failures in a row the virtual camera leaves the apps only if it was never
+        // validated. A validated one stays listed (black) and retries: with the card idle,
+        // another program may have taken it for a while.
+        public static bool Unregister(int failures, bool validated) { return failures >= 3 && !validated; }
     }
 }
