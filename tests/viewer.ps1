@@ -1,4 +1,4 @@
-# Testes do MultiCam.Viewer.exe (PiP e papel de parede). Precisa de uma sessão de área de trabalho interativa.
+﻿# Testes do MultiCam.Viewer.exe (PiP e papel de parede). Precisa de uma sessão de área de trabalho interativa.
 # Uso: powershell -NoProfile -ExecutionPolicy Bypass -File tests/viewer.ps1
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'native.ps1')
@@ -44,6 +44,7 @@ public static class Win {
 # Pixels físicos em GetWindowRect e Screen, como o viewer (que é per-monitor aware).
 [void][Win]::SetProcessDPIAware()
 Add-Type -AssemblyName System.Windows.Forms
+[Reflection.Assembly]::LoadFrom((Join-Path (Split-Path $PSScriptRoot -Parent) 'dist/MultiCam.exe')) | Out-Null
 $failures = 0
 function Pass($name) { Write-Host "PASS $name" }
 function Fail($name, $why) { $script:failures++; Write-Host "FAIL $name : $why" }
@@ -138,6 +139,20 @@ function Test-GarbageStdin {
         if (-not $v.P.WaitForExit(3000)) { return Fail $name 'viewer não saiu em 3 s' }
         $bad = @($v.Lines() | Where-Object { $_ -match 'error|erro' })
         if ($v.P.ExitCode -eq 0 -and -not $bad) { Pass $name } else { Fail $name "código $($v.P.ExitCode), erros: $bad" }
+    } finally { Stop-Viewer $v }
+}
+# O viewer aberto conta como uso da câmera (vaga de demanda) e libera ao sair.
+function Test-ViewerSignalsDemand {
+    $name = 'viewer_signals_demand'; $id = New-Id; $v = $null
+    try {
+        $v = [VProc]::Start($viewerExe, "--pip $id 100 100 320 180 0 0 $PID")
+        if (-not (Wait-Event $v 'ready' 5)) { return Fail $name 'sem evento ready' }
+        Start-Sleep -Milliseconds 300
+        $during = [MultiCam.Demand]::Active($id)
+        $v.P.StandardInput.WriteLine('quit')
+        if (-not $v.P.WaitForExit(3000)) { return Fail $name 'viewer não saiu em 3 s' }
+        $after = [MultiCam.Demand]::Active($id)
+        if ($during -and -not $after) { Pass $name } else { Fail $name "durante=$during depois=$after" }
     } finally { Stop-Viewer $v }
 }
 function Test-BadArgs {
@@ -265,6 +280,7 @@ Test-PipModeChange
 Test-ParentExit
 Test-GarbageStdin
 Test-BadArgs
+Test-ViewerSignalsDemand
 
 Write-Host 'Aviso: a área de trabalho muda por alguns segundos nos testes de papel de parede.'
 Test-WallpaperAttaches

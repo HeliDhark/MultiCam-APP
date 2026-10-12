@@ -1,5 +1,6 @@
 #include "source/output-filter.hpp"
 #include "channel.hpp"
+#include "demand.hpp"
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -37,7 +38,11 @@ class Camera final : public DShow::OutputFilter {
         Clock::time_point lastNew{}, lastOpen{}, lastSent=Clock::now();
         uint32_t sent=0;
         bool repeating=false;
+        // While this thread delivers video the camera is in use: the panel keeps the card capturing.
+        multi::DemandClient demand;
+        demand.begin(id_);
         while (WaitForSingleObject(stop_,0)!=WAIT_OBJECT_0) {
+            demand.beat();
             const auto interval=GetInterval();
             const auto period=std::chrono::nanoseconds(interval*100);
             const int w=GetCX(), h=GetCY();
@@ -91,6 +96,7 @@ class Camera final : public DShow::OutputFilter {
             }
             lastSent=now;
         }
+        demand.end();
         timeEndPeriod(1); CoUninitialize();
     }
 public:

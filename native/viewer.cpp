@@ -17,6 +17,7 @@
 #include <vector>
 #include <cstdio>
 #include "channel.hpp"
+#include "demand.hpp"
 #include "renderer.hpp"
 #include "viewer_core.hpp"
 
@@ -571,6 +572,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::snprintf(ready, sizeof(ready), "{\"Event\":\"ready\",\"Hwnd\":%lld}", static_cast<long long>(reinterpret_cast<intptr_t>(hwnd)));
     emit(ready);
     if (HANDLE t = CreateThread(nullptr, 0, readInput, nullptr, 0, nullptr)) CloseHandle(t);
+    // An open viewer is a use of the camera: the panel keeps the card capturing.
+    multi::DemandClient demand;
+    demand.begin(app.opt.camera);
 
     const ULONGLONG start = GetTickCount64();
     ULONGLONG lastStats = start, lastFullscreenCheck = 0;
@@ -589,6 +593,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (app.quit) break;
 
         const ULONGLONG now = GetTickCount64();
+        demand.beat(now);
         if (app.opt.wallpaper) {
             if (now - lastFullscreenCheck >= 500) {
                 lastFullscreenCheck = now;
@@ -610,6 +615,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             lastStats = now;
         }
     }
+    demand.end();
     if (app.opt.wallpaper) {
         WTSUnRegisterSessionNotification(hwnd);
         HWND worker = GetParent(hwnd);

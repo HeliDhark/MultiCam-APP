@@ -32,6 +32,9 @@ try {
         $null = $c.Process.Handle
         $children += $c.Process
     }
+    # Enquanto os apps recebem vídeo, a câmera está em uso (vaga de demanda).
+    Start-Sleep -Seconds 2
+    $demandDuring = [MultiCam.Demand]::Active($camera.Id)
     foreach ($c in $cases) {
         if (-not $c.Process.WaitForExit(20000)) { throw "$($c.Name): consumidor não terminou" }
         $r = Get-Content (Join-Path $out "$($c.Name).json") -Raw | ConvertFrom-Json
@@ -40,6 +43,10 @@ try {
         $line = "$($c.Name): $($r.Samples) quadros, $($r.Repeats) repetidos, $($r.Irregular) fora de ordem/pulos"
         if ($r.Samples -gt 0 -and $bad -le $limit) { Write-Host "PASS $line" } else { $failures++; Write-Host "FAIL $line (limite $limit)" }
     }
+    Start-Sleep -Milliseconds 1000
+    $demandAfter = [MultiCam.Demand]::Active($camera.Id)
+    $line = "consumer_signals_demand: durante=$demandDuring depois=$demandAfter"
+    if ($demandDuring -and -not $demandAfter) { Write-Host "PASS $line" } else { $failures++; Write-Host "FAIL $line" }
     # Fonte parada (worker reiniciando): o app continua recebendo na taxa pedida, com o
     # último quadro repetido e, depois de 500 ms, preto.
     [void]$producer.WaitForExit(10000)
