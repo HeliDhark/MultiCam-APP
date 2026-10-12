@@ -171,6 +171,10 @@ namespace MultiCam {
         // Cameras whose virtual camera is registered. It outlives a restart of the capture worker,
         // so PiP and wallpaper stay open (last frame, then black) while the worker comes back.
         HashSet<string> registered=new HashSet<string>();
+        // Capture on demand: a card runs while its camera is in use and for a minute after.
+        CaptureScheduler scheduler=new CaptureScheduler();
+        DemandWaker waker;
+        bool wakePending;
         NotifyIcon tray;
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=2000 };
         ListView list=new ListView { Dock=DockStyle.Fill,View=View.Details,FullRowSelect=true,HideSelection=false,MultiSelect=false };
@@ -244,7 +248,7 @@ namespace MultiCam {
             menu.Items.Add("Sair e liberar as placas",null,(s,e)=>ExitApp());
             tray=new NotifyIcon {Icon=Icon,Text="MultiCam",ContextMenuStrip=menu,Visible=true}; tray.DoubleClick+=(s,e)=>ShowWindow();
             timer.Tick+=async(s,e)=>await RefreshCameras();
-            Shown+=async(s,e)=> { if(hidden)Hide(); await RefreshCameras(); timer.Start(); };
+            Shown+=async(s,e)=> { if(hidden)Hide(); waker=new DemandWaker(()=> { try { BeginInvoke((Action)Wake); } catch {} }); await RefreshCameras(); timer.Start(); };
             FormClosing+=(s,e)=> { if(!exiting) {e.Cancel=true;Hide();} };
             Application.ApplicationExit+=(s,e)=>Cleanup();
             Microsoft.Win32.SystemEvents.SessionEnding+=(s,e)=>Cleanup();
@@ -269,6 +273,8 @@ namespace MultiCam {
             diagnosticTimer.Start();
         }
         protected override void WndProc(ref Message m) { base.WndProc(ref m); if(m.Msg==0x219 && !busy) timer.Interval=500; }
+        // An app started using a camera: refresh now, or right after the refresh in progress.
+        void Wake() { if(busy) wakePending=true; else timer.Interval=50; }
         void ShowSelected() {
             var c=Selected; loading=true; modes.Items.Clear();
             if(c!=null) {
@@ -387,6 +393,7 @@ namespace MultiCam {
         void Stop(Camera c) {
             Registration.Remove(c,false);
             registered.Remove(c.Id);
+            scheduler.Forget(c.Id);
             EndSession(c);
         }
         // Ends only the capture worker. The virtual camera stays registered so open
@@ -417,6 +424,7 @@ namespace MultiCam {
                     c.LastName=d.Name;c.LastPath=d.Path;c.IdentityKind=d.IdentityKind;c.Location=d.Location;
                     if(!c.Enabled) {Stop(c);continue;}
                     Session session;
+                    var action=scheduler.Decide(c.Id,registered.Contains(c.Id),Demand.Active(c.Id),sessions.ContainsKey(c.Id),DateTime.UtcNow);
                     if(sessions.TryGetValue(c.Id,out session)) {
                         if(session.Exited) {
                             errors[c.Id]=String.IsNullOrEmpty(session.Error)?"Captura encerrada. Confira o modo e feche o acesso direto à placa.":session.Error;
@@ -424,9 +432,12 @@ namespace MultiCam {
                             if(count>=3) Stop(c); else EndSession(c);
                             retry[c.Id]=DateTime.UtcNow.AddSeconds(count>=3?10:2);
                         }
-                        else if(session.Ready&&!session.Published) { Registration.Publish(c); registered.Add(c.Id); session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
+                        else if(session.Ready&&!session.Published) { Registration.Publish(c); registered.Add(c.Id); scheduler.Touch(c.Id,DateTime.UtcNow); session.Published=true; errors.Remove(c.Id); failures.Remove(c.Id); }
+                        // No app, PiP or wallpaper for a minute: stop the card, keep the camera registered.
+                        else if(action==CaptureAction.Stop) EndSession(c);
                         continue;
                     }
+                    if(action!=CaptureAction.Start)continue;
                     DateTime next; if(retry.TryGetValue(c.Id,out next)&&next>DateTime.UtcNow)continue;
                     try {
                         if(c.Modes.Count==0) {await ReadModes(c);changed=true;}
@@ -439,15 +450,15 @@ namespace MultiCam {
                 if(changed)Storage.Save(config);
                 if(changed && wallCamera.Items.Count!=config.Cameras.Count && !wallCamera.DroppedDown)ShowWallpaper();
                 ReconcileViewers();
-                RenderList();status.Text=devices.Count+" placa(s) USB · "+sessions.Values.Count(s=>s.Published)+" compartilhada(s) · Fechar a janela mantém o programa na bandeja.";
+                RenderList();status.Text=devices.Count+" placa(s) USB · "+registered.Count+" compartilhada(s) · Fechar a janela mantém o programa na bandeja.";
             } catch(Exception ex) {status.Text=ex.Message;Storage.Log(ex.ToString());}
-            finally {busy=false;if(closePending)ExitApp();}
+            finally {busy=false;if(wakePending) {wakePending=false;timer.Interval=50;}if(closePending)ExitApp();}
         }
         void RenderList() {
             var selected=Selected;list.BeginUpdate();
             foreach(var c in config.Cameras) {
                 Session s;sessions.TryGetValue(c.Id,out s);
-                string state=!connected.Contains(c.Identity)?"Desconectada":!c.Enabled?"Desativada":s!=null?(s.Published?"Compartilhando":"Iniciando…"):errors.ContainsKey(c.Id)?"Precisa de atenção":"Detectada";
+                string state=!connected.Contains(c.Identity)?"Desconectada":!c.Enabled?"Desativada":s!=null?(s.Published?"Compartilhando":"Iniciando…"):registered.Contains(c.Id)?"Em espera":errors.ContainsKey(c.Id)?"Precisa de atenção":"Detectada";
                 string view=Display(c,config); string viewState=viewers.Status(c); if(viewState.StartsWith("Falhou"))view="PiP falhou";
                 var values=new[]{c.Alias+" (Multi)",c.LastName,state,c.Mode==null?"Selecione um modo":c.Mode.ToString(),s==null?"—":Interlocked.Read(ref s.Fps).ToString(),view};
                 var item=list.Items.Cast<ListViewItem>().FirstOrDefault(v=>((Camera)v.Tag).Id==c.Id);
@@ -476,7 +487,7 @@ namespace MultiCam {
             finally{busy=false;ShowSelected();}
             await RefreshCameras();
         }
-        void Cleanup() {timer.Stop();try{viewers.StopAll();}catch(Exception ex){Storage.Log(ex.Message);}foreach(var c in config.Cameras)try{Stop(c);}catch(Exception ex){Storage.Log(ex.Message);}if(tray!=null)tray.Visible=false;}
+        void Cleanup() {timer.Stop();if(waker!=null) {waker.Dispose();waker=null;}try{viewers.StopAll();}catch(Exception ex){Storage.Log(ex.Message);}foreach(var c in config.Cameras)try{Stop(c);}catch(Exception ex){Storage.Log(ex.Message);}if(tray!=null)tray.Visible=false;}
         void ExitApp() {if(busy){closePending=true;return;}exiting=true;Cleanup();Close();Application.Exit();}
     }
     static class Program {
