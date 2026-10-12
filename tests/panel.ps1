@@ -149,6 +149,10 @@ Run 'manager_failures_reset' {
 }
 
 # ---------------------------------------------------------------- captura sob demanda
+# Um painel do MultiCam aberto espera o mesmo evento de despertar (auto-reset) e o consome antes.
+$mutex = $null
+$panelOpen = [Threading.Mutex]::TryOpenExisting('Local\MultiCam-App', [ref]$mutex)
+if ($panelOpen) { $mutex.Dispose(); Write-Host 'Aviso: o MultiCam está aberto; os testes do evento de despertar serão pulados.' }
 function Assert-Action($name, $actual, $expected) {
     if ("$actual" -eq $expected) { return $true }
     Fail $name "esperado $expected, veio $actual"; return $false
@@ -255,6 +259,7 @@ Run 'demand_low_integrity_client' {
         Start-Sleep -Milliseconds 800
         $during = [MultiCam.Demand]::Active($id); $woke = [WakeFlag]::Woke
         [void]$p.WaitForExit(8000)
+        if ($panelOpen) { $woke = $true }  # o painel aberto consome o evento; o uso visto basta
         if ($during -and $woke -and $p.ExitCode -eq 0) { Pass 'demand_low_integrity_client' }
         else { Fail 'demand_low_integrity_client' "uso=$during acordou=$woke saída=$($p.ExitCode)" }
     } finally {
@@ -263,7 +268,7 @@ Run 'demand_low_integrity_client' {
         Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-Run 'demand_waker' {
+if ($panelOpen) { Write-Host 'SKIP demand_waker: o MultiCam está aberto e consome o evento' } else { Run 'demand_waker' {
     # O callback roda numa thread do .NET: um delegate C#, não um scriptblock (sem runspace lá).
     if (-not ('WakeFlag' -as [type])) { Add-Type -TypeDefinition 'public static class WakeFlag { public static volatile bool Woke; public static System.Action Setter() { return delegate { Woke = true; }; } }' }
     [WakeFlag]::Woke = $false
@@ -276,7 +281,7 @@ Run 'demand_waker' {
         while (-not [WakeFlag]::Woke -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
         if ([WakeFlag]::Woke) { Pass 'demand_waker' } else { Fail 'demand_waker' 'evento não acordou o painel em 2 s' }
     } finally { $waker.Dispose(); if ($p -and -not $p.HasExited) { $p.Kill() } }
-}
+} }
 
 if ($failures) { Write-Host "FAIL ($failures)"; exit 1 }
 Write-Host 'PASS'

@@ -50,33 +50,41 @@ class Camera final : public DShow::OutputFilter {
             const size_t bytes=size_t(w)*h*2;
             auto now=Clock::now();
             if (!channel_.valid() && now-lastOpen>=std::chrono::milliseconds(100)) { lastOpen=now; channel_.open(id_,false); }
-            bool fresh=false;
+            // A real card is not regular: it stalls for a few frames (50-100 ms) and then delivers
+            // a burst 1-2 ms apart. Like the card itself, deliver every frame once, in order: the
+            // one after the last delivered (or `step` after it), not the newest. Only a frame
+            // already overwritten (3 slots: two or more behind) is skipped.
+            uint32_t wanted=0;
             if (channel_.valid()) {
                 const uint32_t latest=channel_.latest();
                 const int64_t source=channel_.sourceInterval();
                 const uint32_t step=source>0 ? uint32_t(std::max<long long>(1,std::llround(double(interval)/double(source)))) : 1;
-                // Late source: take what there is after 1.5 periods rather than drop the rate further.
-                fresh=latest && latest!=sent && (!sent || latest-sent>=step || now-lastSent>=period*3/2);
+                if (latest && latest!=sent) {
+                    if (!sent) wanted=latest;
+                    else if (latest-sent>=step) wanted=uint32_t(latest-(sent+step))>1 ? latest-1 : sent+step;
+                    // A source slower than expected: take what there is rather than drop the rate further.
+                    else if (now-lastSent>=period*3/2) wanted=latest;
+                }
             }
+            const bool fresh=wanted!=0;
             // Without new frames keep the stream alive at the client's rate: repeat the last
-            // frame (a driver hiccup, a worker restart), and black once the source has been
-            // gone for a while. The first repeat waits 1.5 periods so a late frame is not doubled.
-            if (!fresh && now-lastSent<(repeating ? period : period*3/2)) {
-                // Sleep through most of the period and poll every 1 ms only near the next frame.
-                const auto quiet=std::chrono::duration_cast<std::chrono::milliseconds>(lastSent+period-std::chrono::milliseconds(4)-now).count();
-                if (WaitForSingleObject(stop_,quiet>1 ? DWORD(quiet) : 1)==WAIT_OBJECT_0) break;
+            // frame, and black once the source has been gone for a while. Only after a real stall
+            // (a worker restart), never during the short stalls of a working card.
+            const auto stall=std::chrono::milliseconds(150);
+            if (!fresh && (repeating ? now-lastSent<period : now-lastSent<stall)) {
+                if (WaitForSingleObject(stop_,1)==WAIT_OBJECT_0) break;
                 continue;
             }
             repeating=!fresh;
             BYTE* target=nullptr;
             if (LockSampleData(&target)) {
-                // Copied straight from shared memory into the sample: the newest frame, or the
+                // Copied straight from shared memory into the sample: the wanted frame, or the
                 // last one again (it stays in its slot while the source is stalled).
                 bool received=false;
                 if (fresh) {
-                    uint32_t newest=0;
-                    received=channel_.copyTo(target,uint32_t(w),uint32_t(h),newest);
-                    if (received) { sent=newest; lastNew=now; }
+                    uint32_t frame=wanted;
+                    received=channel_.copyTo(target,uint32_t(w),uint32_t(h),frame);
+                    if (received) { sent=frame; lastNew=now; }
                     else sent=channel_.latest();  // torn or resized: never retry this one
                 }
                 if (!received && sent && now-lastNew<=hold) { uint32_t again=sent; received=channel_.copyTo(target,uint32_t(w),uint32_t(h),again); }

@@ -47,6 +47,29 @@ try {
     $demandAfter = [MultiCam.Demand]::Active($camera.Id)
     $line = "consumer_signals_demand: durante=$demandDuring depois=$demandAfter"
     if ($demandDuring -and -not $demandAfter) { Write-Host "PASS $line" } else { $failures++; Write-Host "FAIL $line" }
+    # Ritmo de placa real (tests/pacing-burst.txt, modelado na FreeSky): a cada ~2 s ela para
+    # 50-97 ms e depois entrega uma rajada de quadros a 1-2 ms. A placa direta entrega todos;
+    # a câmera virtual também precisa entregar cada quadro uma vez, sem repetir nem pular.
+    [void]$producer.WaitForExit(10000)
+    $producer = Start-Process $x64 -ArgumentList '--produce-pattern', $id, 1280, 720, 166667, 15, ('"' + (Join-Path $PSScriptRoot 'pacing-burst.txt') + '"') -PassThru -WindowStyle Hidden
+    $children += $producer
+    Start-Sleep -Milliseconds 500
+    $bursts = @(
+        @{ Name = 'bursts_60fps'; Interval = 166667 },
+        @{ Name = 'bursts_30fps'; Interval = 333333 })
+    foreach ($c in $bursts) {
+        $c.Process = Start-Process $x64 -ArgumentList '--consume', $id, $c.Interval, 12 -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $out "$($c.Name).json") -RedirectStandardError (Join-Path $out "$($c.Name).err")
+        $null = $c.Process.Handle; $children += $c.Process
+    }
+    foreach ($c in $bursts) {
+        if (-not $c.Process.WaitForExit(25000)) { throw "$($c.Name): consumidor não terminou" }
+        $r = Get-Content (Join-Path $out "$($c.Name).json") -Raw | ConvertFrom-Json
+        # Pulado = movimento perdido. Um ajuste de fase depois de uma parada (30 FPS pega o quadro
+        # seguinte em vez de esperar o próximo par) não perde movimento e não reprova.
+        $line = "$($c.Name): $($r.Samples) quadros, $($r.Repeats) repetidos, $($r.Skipped) pulados, $($r.Irregular - $r.Skipped) ajustes de fase"
+        if ($r.Samples -gt 0 -and $r.Repeats + $r.Skipped -le 1) { Write-Host "PASS $line" } else { $failures++; Write-Host "FAIL $line (limite 1)" }
+    }
     # Fonte parada (worker reiniciando): o app continua recebendo na taxa pedida, com o
     # último quadro repetido e, depois de 500 ms, preto.
     [void]$producer.WaitForExit(10000)

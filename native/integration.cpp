@@ -8,6 +8,8 @@
 #include <thread>
 #include <chrono>
 #include <stdexcept>
+#include <fstream>
+#include <vector>
 #include <algorithm>
 #include <cmath>
 using namespace DShow;
@@ -48,15 +50,16 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
     info->bmiHeader.biWidth+=2;
     if(SUCCEEDED(format->SetFormat(type)))throw std::runtime_error("accepted invalid dimensions");
     info->bmiHeader.biWidth=w;info->AvgTimePerFrame=requested;check(format->SetFormat(type),"set FPS");
-    std::atomic<int> samples{0},unique{0},torn{0},black{0},badTime{0},repeats{0},irregular{0};uint32_t last=0;REFERENCE_TIME prev=-1;
+    std::atomic<int> samples{0},unique{0},torn{0},black{0},badTime{0},repeats{0},irregular{0},skipped{0};uint32_t last=0;REFERENCE_TIME prev=-1;
     PinCaptureInfo sinkInfo;sinkInfo.expectedMajorType=MEDIATYPE_Video;sinkInfo.expectedSubType=MEDIASUBTYPE_YUY2;
     sinkInfo.callback=[&](IMediaSample* sample){BYTE* data; if(FAILED(sample->GetPointer(&data)))return;
         if(sample->GetActualDataLength()!=w*h*2){++torn;return;}
         uint32_t a,b;memcpy(&a,data,4);memcpy(&b,data+size_t(w)*h*2-4,4);
         if(!physical && a==0x80108010){++black;return;}
         if(!physical && a!=b)++torn;
-        // Pacing: the same frame twice, or a jump other than `step` (a skipped source frame).
-        if(!physical && last){if(a==last)++repeats;else if(a-last!=uint32_t(step))++irregular;}
+        // Pacing: the same frame twice (repeat), a jump other than `step` (irregular), and a
+        // jump larger than `step` (skipped: a source frame, i.e. motion, was lost).
+        if(!physical && last){if(a==last)++repeats;else if(a-last!=uint32_t(step)){++irregular;if(a-last>uint32_t(step))++skipped;}}
         if(a!=last){++unique;last=a;}++samples;
         REFERENCE_TIME t,end;if(SUCCEEDED(sample->GetTime(&t,&end))){if(t<=prev)++badTime;prev=t;}
     };
@@ -66,8 +69,27 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
     // Exercise the preroll-to-Run clock transition, not just a direct Run.
     if(!physical){check(control->Pause(),"pause");std::this_thread::sleep_for(std::chrono::milliseconds(100));}
     check(control->Run(),"run");std::this_thread::sleep_for(std::chrono::seconds(seconds));check(control->Stop(),"stop");
-    std::cout<<"{\"Samples\":"<<samples<<",\"Unique\":"<<unique<<",\"Torn\":"<<torn<<",\"Black\":"<<black<<",\"BadTime\":"<<badTime<<",\"Repeats\":"<<repeats<<",\"Irregular\":"<<irregular<<"}\n";
+    std::cout<<"{\"Samples\":"<<samples<<",\"Unique\":"<<unique<<",\"Torn\":"<<torn<<",\"Black\":"<<black<<",\"BadTime\":"<<badTime<<",\"Repeats\":"<<repeats<<",\"Irregular\":"<<irregular<<",\"Skipped\":"<<skipped<<"}\n";
     return samples>int(seconds*10000000.0/requested*0.8)&&torn==0&&badTime==0?0:5;
+}
+// Replays a recorded sequence of frame intervals (ms, one per line), looping it: a real card
+// is not regular, it stalls for a few frames and then delivers a burst.
+static int producePattern(const std::wstring& id,int w,int h,long long interval,int seconds,const std::wstring& file) {
+    std::vector<double> gaps; std::ifstream in(file.c_str());
+    for(double g;in>>g;)gaps.push_back(g); if(gaps.empty())return 3;
+    multi::Channel c;if(!c.open(id,true))return 2;
+    c.begin(uint32_t(w),uint32_t(h),interval);timeBeginPeriod(1);
+    auto start=std::chrono::steady_clock::now(),end=start+std::chrono::seconds(seconds),next=start;
+    uint32_t sequence=0;
+    while(next<end) {
+        next+=std::chrono::microseconds(llround(gaps[sequence%gaps.size()]*1000));
+        std::this_thread::sleep_until(next);
+        ++sequence;auto slot=c.writeSlot();
+        memset(slot,sequence%200+20,size_t(w)*h*2);memcpy(slot,&sequence,4);memcpy(slot+size_t(w)*h*2-4,&sequence,4);
+        c.publish();
+    }
+    c.stop();timeEndPeriod(1);
+    std::cout<<"{\"Produced\":"<<sequence<<"}\n";return 0;
 }
 // Holds a demand slot for a while, like an app using the camera (panel tests).
 static int demand(const std::wstring& id,int seconds) {
@@ -81,6 +103,7 @@ int wmain(int argc,wchar_t** argv){CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         else if(argc==10&&std::wstring(argv[1])==L"--produce-solid"){const int yuv[3]={std::stoi(argv[7]),std::stoi(argv[8]),std::stoi(argv[9])};
             result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),yuv);}
         else if(argc==7&&std::wstring(argv[1])==L"--produce-real")result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),nullptr,true);
+        else if(argc==8&&std::wstring(argv[1])==L"--produce-pattern")result=producePattern(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),argv[7]);
         else if(argc==4&&std::wstring(argv[1])==L"--demand")result=demand(argv[2],std::stoi(argv[3]));
         else if(argc==5&&std::wstring(argv[1])==L"--consume")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]));
         else if(argc==5&&std::wstring(argv[1])==L"--observe")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]),true);

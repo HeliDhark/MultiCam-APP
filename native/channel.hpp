@@ -32,6 +32,7 @@ class Channel {
     std::vector<uint8_t> frame_, scratch_;
     uint32_t seq_ = 0;
     uint32_t next_ = 0;
+    LONGLONG lastPublish_ = 0;  // writer: QPC of the last publish
     uint8_t* slot(uint32_t sequence) { return static_cast<uint8_t*>(view_) + sizeof(Header) + size_t(sequence % Slots) * Capacity; }
 public:
     enum class Read { NoFrame, Unchanged, Updated, Mismatch };
@@ -76,12 +77,27 @@ public:
         if (next_ == 0) next_ = 1;
         return slot(next_);
     }
+    // A real card stalls for a few frames and then delivers a burst 1-2 ms apart. With 3 slots
+    // a reader that is busy for a moment would lose the oldest frames of the burst, so frames
+    // are published at least a third of the frame interval apart (5.5 ms at 60 FPS). Regular
+    // frames never wait; a burst is spread over a few ms. Spins only during such a burst.
     void publish() {
         auto hdr = header();
+        LARGE_INTEGER frequency, now;
+        QueryPerformanceFrequency(&frequency);
+        const LONGLONG minGap = frequency.QuadPart * hdr->interval / 30000000;  // interval is in 100 ns
+        if (lastPublish_)
+            for (;;) {
+                QueryPerformanceCounter(&now);
+                if (now.QuadPart - lastPublish_ >= minGap) break;
+                SwitchToThread();
+            }
         ++hdr->frames; hdr->tick = GetTickCount64();
         MemoryBarrier();
         hdr->published = next_;
         hdr->active = 1;
+        QueryPerformanceCounter(&now);
+        lastPublish_ = now.QuadPart;
     }
     void stop() { if (view_) header()->active = 0; }
 

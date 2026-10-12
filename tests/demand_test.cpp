@@ -88,6 +88,12 @@ static void no_area_no_demand() {
     CHECK(!multi::demandActive(newId()));
 }
 static void wake_event() {
+    // A running MultiCam panel waits on the same auto-reset event and takes the signal first.
+    if (HANDLE app = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\MultiCam-App")) {
+        CloseHandle(app);
+        std::printf("SKIP wake_event: o MultiCam está aberto e consome o evento\n");
+        return;
+    }
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, multi::DemandWakeName);
     WaitForSingleObject(wake, 0);  // drop a signal left by another test
     multi::DemandClient c;
