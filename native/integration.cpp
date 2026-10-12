@@ -51,6 +51,9 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
     if(SUCCEEDED(format->SetFormat(type)))throw std::runtime_error("accepted invalid dimensions");
     info->bmiHeader.biWidth=w;info->AvgTimePerFrame=requested;check(format->SetFormat(type),"set FPS");
     std::atomic<int> samples{0},unique{0},torn{0},black{0},badTime{0},repeats{0},irregular{0},skipped{0};uint32_t last=0;REFERENCE_TIME prev=-1;
+    // Physical source only: identical consecutive samples, arrival intervals, frames published meanwhile.
+    int same=0,late=0;uint64_t lastHash=0;double minMs=1e9,maxMs=0;std::chrono::steady_clock::time_point lastArrival{};
+    multi::Channel channel;if(physical)channel.open(id,false);
     PinCaptureInfo sinkInfo;sinkInfo.expectedMajorType=MEDIATYPE_Video;sinkInfo.expectedSubType=MEDIASUBTYPE_YUY2;
     sinkInfo.callback=[&](IMediaSample* sample){BYTE* data; if(FAILED(sample->GetPointer(&data)))return;
         if(sample->GetActualDataLength()!=w*h*2){++torn;return;}
@@ -62,14 +65,33 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
         if(!physical && last){if(a==last)++repeats;else if(a-last!=uint32_t(step)){++irregular;if(a-last>uint32_t(step))++skipped;}}
         if(a!=last){++unique;last=a;}++samples;
         REFERENCE_TIME t,end;if(SUCCEEDED(sample->GetTime(&t,&end))){if(t<=prev)++badTime;prev=t;}
+        if(physical){
+            // Live video: a sample identical to the previous one is a repeat (sparse FNV-1a hash).
+            uint64_t hash=1469598103934665603ULL;
+            for(size_t i=0;i<size_t(w)*h*2;i+=61){hash^=data[i];hash*=1099511628211ULL;}
+            if(hash==lastHash)++same;lastHash=hash;
+            const auto now=std::chrono::steady_clock::now();
+            if(lastArrival.time_since_epoch().count()){
+                const double ms=std::chrono::duration<double,std::milli>(now-lastArrival).count();
+                minMs=std::min(minMs,ms);maxMs=std::max(maxMs,ms);if(ms>25)++late;
+            }
+            lastArrival=now;
+        }
     };
     ComPtr<IBaseFilter> sink=new CaptureFilter(sinkInfo);
     check(graph->AddFilter(source,L"MultiCam test source"),"add source");check(graph->AddFilter(sink,L"MultiCam test sink"),"add sink");
     check(builder->RenderStream(&PIN_CATEGORY_CAPTURE,&MEDIATYPE_Video,source,nullptr,sink),"connect");
     // Exercise the preroll-to-Run clock transition, not just a direct Run.
     if(!physical){check(control->Pause(),"pause");std::this_thread::sleep_for(std::chrono::milliseconds(100));}
-    check(control->Run(),"run");std::this_thread::sleep_for(std::chrono::seconds(seconds));check(control->Stop(),"stop");
-    std::cout<<"{\"Samples\":"<<samples<<",\"Unique\":"<<unique<<",\"Torn\":"<<torn<<",\"Black\":"<<black<<",\"BadTime\":"<<badTime<<",\"Repeats\":"<<repeats<<",\"Irregular\":"<<irregular<<",\"Skipped\":"<<skipped<<"}\n";
+    check(control->Run(),"run");
+    std::this_thread::sleep_for(std::chrono::seconds(1));  // let the stream settle
+    const int samples0=samples;const uint32_t published0=channel.valid()?channel.latest():0;
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    const int delivered=samples-samples0;const uint32_t published=channel.valid()?channel.latest()-published0:0;
+    check(control->Stop(),"stop");
+    std::cout<<"{\"Samples\":"<<samples<<",\"Unique\":"<<unique<<",\"Torn\":"<<torn<<",\"Black\":"<<black<<",\"BadTime\":"<<badTime<<",\"Repeats\":"<<repeats<<",\"Irregular\":"<<irregular<<",\"Skipped\":"<<skipped;
+    if(physical)std::cout<<",\"Delivered\":"<<delivered<<",\"Published\":"<<published<<",\"Same\":"<<same<<",\"MinMs\":"<<minMs<<",\"MaxMs\":"<<maxMs<<",\"Late25\":"<<late;
+    std::cout<<"}\n";
     return samples>int(seconds*10000000.0/requested*0.8)&&torn==0&&badTime==0?0:5;
 }
 // Replays a recorded sequence of frame intervals (ms, one per line), looping it: a real card
