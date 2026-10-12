@@ -1,4 +1,4 @@
-# Testes da lógica do painel para o Viewer (configurações, presets, processos).
+﻿# Testes da lógica do painel para o Viewer (configurações, presets, processos).
 # Uso: powershell -NoProfile -ExecutionPolicy Bypass -File tests/panel.ps1   (depois de ./build.ps1)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -146,6 +146,83 @@ Run 'manager_failures_reset' {
         if (-not $status.StartsWith('Falhou') -and $manager.Started -ge 4) { Pass 'manager_failures_reset' }
         else { Fail 'manager_failures_reset' "Status='$status' Started=$($manager.Started)" }
     } finally { $manager.Dispose(); Remove-Item $fake -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------- captura sob demanda
+function Assert-Action($name, $actual, $expected) {
+    if ("$actual" -eq $expected) { return $true }
+    Fail $name "esperado $expected, veio $actual"; return $false
+}
+$sid = [guid]::NewGuid().ToString(); $t0 = [DateTime]::UtcNow
+Run 'scheduler_validation_then_idle' {
+    $script:sched = New-Object MultiCam.CaptureScheduler
+    $ok = (Assert-Action 'scheduler_validation_then_idle' $sched.Decide($sid, $false, $false, $false, $t0) 'Start')
+    $sched.Touch($sid, $t0)
+    $ok = $ok -and (Assert-Action 'scheduler_validation_then_idle' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(59)) 'Keep')
+    $ok = $ok -and (Assert-Action 'scheduler_validation_then_idle' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(60)) 'Stop')
+    $ok = $ok -and (Assert-Action 'scheduler_validation_then_idle' $sched.Decide($sid, $true, $false, $false, $t0.AddSeconds(61)) 'Keep')
+    if ($ok) { Pass 'scheduler_validation_then_idle' }
+}
+Run 'scheduler_demand_restarts' {
+    $ok = (Assert-Action 'scheduler_demand_restarts' $sched.Decide($sid, $true, $true, $false, $t0.AddSeconds(70)) 'Start')
+    $ok = $ok -and (Assert-Action 'scheduler_demand_restarts' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(129)) 'Keep')
+    $ok = $ok -and (Assert-Action 'scheduler_demand_restarts' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(130)) 'Stop')
+    if ($ok) { Pass 'scheduler_demand_restarts' }
+}
+Run 'scheduler_forget' {
+    $sched.Forget($sid)
+    if (Assert-Action 'scheduler_forget' $sched.Decide($sid, $true, $false, $true, $t0.AddSeconds(131)) 'Stop') { Pass 'scheduler_forget' }
+}
+
+# Uma vaga mantida por um cliente nativo (x64 ou x86) é vista pelo painel.
+$integrationX86 = Join-Path $root 'build/Win32/Release/MultiCam.Integration.exe'
+function Start-Demand($exe, $id, $seconds) {
+    return Start-Process -FilePath $exe -ArgumentList '--demand', ([guid]$id).ToString('B').ToUpperInvariant(), $seconds -PassThru -WindowStyle Hidden
+}
+foreach ($case in @(@{ Name = 'demand_cross_x64'; Exe = $integrationExe }, @{ Name = 'demand_cross_x86'; Exe = $integrationX86 })) {
+    $name = $case.Name
+    Run $name {
+        $id = [guid]::NewGuid().ToString()
+        $p = Start-Demand $case.Exe $id 3
+        try {
+            Start-Sleep -Milliseconds 700
+            $during = [MultiCam.Demand]::Active($id)
+            if (-not $p.WaitForExit(10000)) { return Fail $name 'cliente não terminou' }
+            $after = [MultiCam.Demand]::Active($id)
+            if ($during -and -not $after) { Pass $name } else { Fail $name "durante=$during depois=$after" }
+        } finally { if (-not $p.HasExited) { $p.Kill() } }
+    }
+}
+# Cliente morto com a área ainda aberta por outro (outro app, ou um app travado): a vaga
+# dele vence em 3 s. (Se ele era o único, a área some junto e o uso acaba na hora.)
+Run 'demand_cross_killed' {
+    $id = [guid]::NewGuid().ToString()
+    $p = Start-Demand $integrationExe $id 30
+    $holder = $null
+    try {
+        Start-Sleep -Milliseconds 700
+        $holder = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting('Local\MultiCam-' + ([guid]$id).ToString('B').ToUpperInvariant() + '-demand')
+        $during = [MultiCam.Demand]::Active($id)
+        $p.Kill(); [void]$p.WaitForExit(5000)
+        $justKilled = [MultiCam.Demand]::Active($id)
+        Start-Sleep -Milliseconds 3500
+        $later = [MultiCam.Demand]::Active($id)
+        if ($during -and $justKilled -and -not $later) { Pass 'demand_cross_killed' } else { Fail 'demand_cross_killed' "durante=$during logo_depois=$justKilled 3,5s=$later" }
+    } finally { if ($holder) { $holder.Dispose() }; if (-not $p.HasExited) { $p.Kill() } }
+}
+Run 'demand_waker' {
+    # O callback roda numa thread do .NET: um delegate C#, não um scriptblock (sem runspace lá).
+    if (-not ('WakeFlag' -as [type])) { Add-Type -TypeDefinition 'public static class WakeFlag { public static volatile bool Woke; public static System.Action Setter() { return delegate { Woke = true; }; } }' }
+    [WakeFlag]::Woke = $false
+    $waker = New-Object MultiCam.DemandWaker ([WakeFlag]::Setter())
+    $p = $null
+    try {
+        Start-Sleep -Milliseconds 200
+        $p = Start-Demand $integrationExe ([guid]::NewGuid().ToString()) 1
+        $deadline = [DateTime]::UtcNow.AddSeconds(2)
+        while (-not [WakeFlag]::Woke -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+        if ([WakeFlag]::Woke) { Pass 'demand_waker' } else { Fail 'demand_waker' 'evento não acordou o painel em 2 s' }
+    } finally { $waker.Dispose(); if ($p -and -not $p.HasExited) { $p.Kill() } }
 }
 
 if ($failures) { Write-Host "FAIL ($failures)"; exit 1 }

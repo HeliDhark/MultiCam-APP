@@ -2,6 +2,7 @@
 #include "source/capture-filter.hpp"
 #include "source/dshow-media-type.hpp"
 #include "channel.hpp"
+#include "demand.hpp"
 #include <atomic>
 #include <iostream>
 #include <thread>
@@ -68,11 +69,19 @@ static int consume(const std::wstring& id,long long requested,int seconds,bool p
     std::cout<<"{\"Samples\":"<<samples<<",\"Unique\":"<<unique<<",\"Torn\":"<<torn<<",\"Black\":"<<black<<",\"BadTime\":"<<badTime<<",\"Repeats\":"<<repeats<<",\"Irregular\":"<<irregular<<"}\n";
     return samples>int(seconds*10000000.0/requested*0.8)&&torn==0&&badTime==0?0:5;
 }
+// Holds a demand slot for a while, like an app using the camera (panel tests).
+static int demand(const std::wstring& id,int seconds) {
+    multi::DemandClient client;if(!client.begin(id))return 2;
+    auto end=std::chrono::steady_clock::now()+std::chrono::seconds(seconds);
+    while(std::chrono::steady_clock::now()<end){client.beat();std::this_thread::sleep_for(std::chrono::milliseconds(200));}
+    client.end();std::cout<<"{\"Demand\":1}\n";return 0;
+}
 int wmain(int argc,wchar_t** argv){CoInitializeEx(nullptr,COINIT_MULTITHREADED);int result=1;
     try { if(argc==7&&std::wstring(argv[1])==L"--produce")result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]));
         else if(argc==10&&std::wstring(argv[1])==L"--produce-solid"){const int yuv[3]={std::stoi(argv[7]),std::stoi(argv[8]),std::stoi(argv[9])};
             result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),yuv);}
         else if(argc==7&&std::wstring(argv[1])==L"--produce-real")result=produce(argv[2],std::stoi(argv[3]),std::stoi(argv[4]),std::stoll(argv[5]),std::stoi(argv[6]),nullptr,true);
+        else if(argc==4&&std::wstring(argv[1])==L"--demand")result=demand(argv[2],std::stoi(argv[3]));
         else if(argc==5&&std::wstring(argv[1])==L"--consume")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]));
         else if(argc==5&&std::wstring(argv[1])==L"--observe")result=consume(argv[2],std::stoll(argv[3]),std::stoi(argv[4]),true);
     }catch(const std::exception&e){std::cerr<<e.what()<<"\n";result=10;}CoUninitialize();return result;
